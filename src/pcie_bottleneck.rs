@@ -137,6 +137,105 @@ pub fn simulate_transfer(
     }
 }
 
+// ─── PCIe Hardware Performance Counter Profiler ──────────────────────────────
+
+/// Simulated Hardware Performance Counters for PCIe.
+#[derive(Debug, Clone, Default)]
+pub struct HardwarePerfCounters {
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub tx_tlp_count: u64,
+    pub rx_tlp_count: u64,
+    pub correctable_errors: u32,
+    pub uncorrectable_errors: u32,
+    pub active_lanes: u8,
+    pub link_speed_gts: f64,
+}
+
+/// PCIe Bottleneck Profiler report.
+#[derive(Debug, Clone)]
+pub struct ProfilerReport {
+    pub utilization_pct: f64,
+    pub severity: String,
+    pub tlp_overhead_bytes: u64,
+    pub is_bottleneck: bool,
+    pub recommendation: String,
+}
+
+/// PCIe Bottleneck Profiler that analyzes hardware performance counters.
+#[derive(Debug, Clone)]
+pub struct PcieProfiler {
+    pub counters: HardwarePerfCounters,
+    pub interconnect: PcieGen,
+}
+
+impl PcieProfiler {
+    pub fn new(interconnect: PcieGen) -> Self {
+        Self {
+            counters: HardwarePerfCounters {
+                active_lanes: 16,
+                link_speed_gts: interconnect.per_lane_gts(),
+                ..Default::default()
+            },
+            interconnect,
+        }
+    }
+
+    /// Simulate reading performance counters after a workload.
+    pub fn record_workload(&mut self, sim: &TransferSimulation) {
+        self.counters.tx_bytes += sim.data_size_bytes;
+        // Assume 1 TLP per 256 bytes payload + 24 bytes overhead
+        self.counters.tx_tlp_count += sim.data_size_bytes / 256;
+        
+        // Simulate minor errors on high utilization
+        if sim.effective_bandwidth_gbps > self.interconnect.bandwidth_gbps() * 0.9 {
+            self.counters.correctable_errors += 1;
+        }
+    }
+
+    /// Calculate the theoretical max throughput in bytes per second for the active link.
+    pub fn theoretical_max_throughput(&self) -> f64 {
+        self.interconnect.bandwidth_gbps() * 1_000_000_000.0 * (self.counters.active_lanes as f64 / 16.0)
+    }
+
+    /// Calculate link utilization given an elapsed time in seconds.
+    pub fn link_utilization_pct(&self, elapsed_sec: f64) -> f64 {
+        if elapsed_sec <= 0.0 {
+            return 0.0;
+        }
+        let max_bytes = self.theoretical_max_throughput() * elapsed_sec;
+        let total_bytes = self.counters.tx_bytes + self.counters.rx_bytes;
+        ((total_bytes as f64) / max_bytes) * 100.0
+    }
+
+    /// Identify if a bottleneck exists based on TLP overhead and utilization.
+    pub fn analyze_bottleneck(&self, elapsed_sec: f64) -> ProfilerReport {
+        let util = self.link_utilization_pct(elapsed_sec);
+        let tlp_overhead = self.counters.tx_tlp_count * 24; // 24 bytes overhead per TLP
+        
+        let is_bottleneck = util > 85.0;
+        let severity = if util > 95.0 {
+            "CRITICAL"
+        } else if util > 85.0 {
+            "WARNING"
+        } else {
+            "HEALTHY"
+        };
+
+        ProfilerReport {
+            utilization_pct: util,
+            severity: severity.to_string(),
+            tlp_overhead_bytes: tlp_overhead,
+            is_bottleneck,
+            recommendation: if is_bottleneck {
+                "Increase PCIe generation, use pinned memory, or implement data compression."
+            } else {
+                "Link operates within acceptable parameters."
+            }.to_string(),
+        }
+    }
+}
+
 // ─── cudaMemPrefetchAsync Simulation ─────────────────────────────────────────
 
 /// Prefetch schedule entry.
@@ -309,6 +408,34 @@ pub fn print_pcie_report(sims: &[TransferSimulation]) {
     println!();
 }
 
+pub fn print_profiler_report(report: &ProfilerReport) {
+    use console::style;
+    println!();
+    println!(
+        "  {} {}",
+        style("PCIe Bottleneck Profiler").cyan().bold(),
+        style("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━").dim()
+    );
+    let sev_style = if report.is_bottleneck { style(&report.severity).red().bold() } else { style(&report.severity).green().bold() };
+    println!(
+        "  {} Status: {} | Utilization: {:.1}%",
+        style("▸").dim(),
+        sev_style,
+        report.utilization_pct
+    );
+    println!(
+        "  {} TLP Overhead: {:.1} MB",
+        style("▸").dim(),
+        report.tlp_overhead_bytes as f64 / 1_000_000.0
+    );
+    println!(
+        "  {} Recommendation: {}",
+        style("▸").dim(),
+        style(&report.recommendation).yellow()
+    );
+    println!();
+}
+
 pub fn print_offload_report(placements: &[LayerOffload]) {
     use console::style;
     println!();
@@ -419,5 +546,19 @@ mod tests {
             .filter(|p| p.placement == LayerPlacement::SystemRam)
             .count();
         assert!(sys_count > 0); // No NVLink, must use system RAM
+    }
+
+    #[test]
+    fn test_pcie_profiler() {
+        let sim = simulate_transfer(CudaMemoryType::Pinned, PcieGen::Gen3, 30_000_000_000); // 30GB transfer
+        let mut profiler = PcieProfiler::new(PcieGen::Gen3);
+        profiler.record_workload(&sim);
+        
+        // Simulating that the transfer took exactly 1 second (100% of 30GB/s Gen3 BW)
+        let report = profiler.analyze_bottleneck(1.0);
+        
+        assert!(report.is_bottleneck);
+        assert_eq!(report.severity, "WARNING"); // 30GB/s on 32GB/s max = 93.75% utilization
+        assert!(report.tlp_overhead_bytes > 0);
     }
 }
