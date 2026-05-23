@@ -9,7 +9,7 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // ─── Architecture Paradigm Types ─────────────────────────────────────────────
@@ -397,6 +397,49 @@ pub struct XdpControlPlane {
     pub rules: Vec<PacketRule>,
     pub stats: XdpStats,
     pub running: Arc<AtomicBool>,
+    pub trace_collector: Option<Arc<TraceCollector>>,
+}
+
+/// Network trace event from eBPF.
+#[derive(Debug, Clone)]
+pub struct TraceEvent {
+    pub timestamp_ns: u64,
+    pub src_ip: IpAddr,
+    pub dst_ip: IpAddr,
+    pub protocol: u8,
+    pub packet_size: u16,
+    pub action_taken: XdpAction,
+    pub processing_latency_ns: u64,
+}
+
+/// Trace collector stub for eBPF telemetry.
+#[derive(Debug)]
+pub struct TraceCollector {
+    pub events: Mutex<Vec<TraceEvent>>,
+    pub max_events: usize,
+    pub total_collected: AtomicU64,
+}
+
+impl TraceCollector {
+    pub fn new(max_events: usize) -> Self {
+        Self {
+            events: Mutex::new(Vec::with_capacity(max_events)),
+            max_events,
+            total_collected: AtomicU64::new(0),
+        }
+    }
+
+    pub fn collect(&self, event: TraceEvent) {
+        let count = self.total_collected.fetch_add(1, Ordering::Relaxed);
+        let mut events = self.events.lock().unwrap();
+        if events.len() < self.max_events {
+            events.push(event);
+        } else {
+            // Ring buffer override
+            let idx = (count as usize) % self.max_events;
+            events[idx] = event;
+        }
+    }
 }
 
 /// XDP pipeline statistics.
@@ -462,6 +505,7 @@ impl XdpControlPlane {
             rules: Vec::new(),
             stats: XdpStats::new(),
             running: Arc::new(AtomicBool::new(false)),
+            trace_collector: None,
         }
     }
 
@@ -490,16 +534,31 @@ impl XdpControlPlane {
         dst_port: u16,
         protocol: u8,
     ) -> XdpAction {
+        let start = std::time::Instant::now();
+        let mut action = XdpAction::Pass;
         for rule in &self.rules {
             if rule
                 .match_criteria
                 .matches(src_ip, dst_ip, src_port, dst_port, protocol)
             {
                 rule.hit_count.fetch_add(1, Ordering::Relaxed);
-                return rule.action;
+                action = rule.action;
+                break;
             }
         }
-        XdpAction::Pass
+        
+        if let Some(collector) = &self.trace_collector {
+            collector.collect(TraceEvent {
+                timestamp_ns: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos() as u64,
+                src_ip,
+                dst_ip,
+                protocol,
+                packet_size: 64, // Simulated size
+                action_taken: action,
+                processing_latency_ns: start.elapsed().as_nanos() as u64,
+            });
+        }
+        action
     }
 
     /// Simulate UDP→TCP obfuscation (in-place header transform).
@@ -710,5 +769,25 @@ mod tests {
         stats.packets_received.store(1_000_000, Ordering::Relaxed);
         stats.bytes_processed.store(64_000_000, Ordering::Relaxed);
         assert!(stats.pps() >= 0.0);
+    }
+
+    #[test]
+    fn test_trace_collector_ring_buffer() {
+        let mut cp = XdpControlPlane::new(XdpLoadBalancerConfig::default());
+        cp.trace_collector = Some(Arc::new(TraceCollector::new(3)));
+        
+        let src = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let dst = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+        
+        // Push 5 events (should overflow ring buffer of size 3)
+        for _ in 0..5 {
+            cp.evaluate_packet(src, dst, 1234, 80, 6);
+        }
+        
+        let collector = cp.trace_collector.as_ref().unwrap();
+        assert_eq!(collector.total_collected.load(Ordering::Relaxed), 5);
+        let events = collector.events.lock().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].action_taken, XdpAction::Pass);
     }
 }
