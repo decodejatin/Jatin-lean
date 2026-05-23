@@ -9,7 +9,7 @@ use std::path::PathBuf;
 // Re-export core functionality
 use crate::{
     analyzer, benchmark, compress, dedup, hardware_tuning, health, lockfile, rules, scanner, simd,
-    treeshake,
+    treeshake, zero_copy_serde,
 };
 
 /// Scan result for Node.js
@@ -297,4 +297,21 @@ pub fn get_ai_context() -> Result<AiContext> {
             simd_tier: caps.tier_name().to_string(),
         },
     })
+}
+
+/// Generate a zero-copy binary buffer for N-API testing
+#[napi]
+pub fn get_zero_copy_sample(entity_count: u32) -> Result<Buffer> {
+    let mut engine = zero_copy_serde::ZeroCopyEngine::new();
+    let response = zero_copy_serde::ZeroCopyEngine::sample_response(entity_count as usize);
+    let bytes = engine.serialize(&response);
+    Ok(bytes.into())
+}
+
+/// Parse a zero-copy buffer passed from Node.js
+#[napi]
+pub fn parse_zero_copy_buffer(buffer: Buffer) -> Result<u32> {
+    let archived = zero_copy_serde::ZeroCopyEngine::access_archived(buffer.as_ref())
+        .ok_or_else(|| Error::from_reason("Failed to access archived buffer in zero-copy mode"))?;
+    Ok(archived.status_code)
 }
