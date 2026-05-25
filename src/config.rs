@@ -243,6 +243,25 @@ impl Config {
             return Ok(Some(Self::from_file(&hidden_config)?));
         }
 
+        // 3.5 package.json
+        let package_json = project_dir.join("package.json");
+        if package_json.exists() {
+            if let Ok(content) = fs::read_to_string(&package_json) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(config_obj) = json.get("jatin-lean") {
+                        if let Ok(config) = serde_json::from_value::<Config>(config_obj.clone()) {
+                            println!(
+                                "  {} Loading config from: {}",
+                                console::style("◉").cyan(),
+                                console::style("package.json").dim()
+                            );
+                            return Ok(Some(config));
+                        }
+                    }
+                }
+            }
+        }
+
         // 4. ~/.config/jatin-lean/rules.toml
         if let Some(home) = dirs::home_dir() {
             let global_config = home.join(".config").join("jatin-lean").join("rules.toml");
