@@ -216,7 +216,12 @@ pub fn scan_node_modules(
             .follow_links(false)
             .build();
 
-        for entry in walker.flatten() {
+        for result in walker {
+            let entry = match result {
+                Ok(e) => e,
+                Err(_) => continue, // gracefully skip permission denied or other errors
+            };
+
             if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                 continue;
             }
