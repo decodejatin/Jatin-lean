@@ -90,7 +90,9 @@ pub fn execute_deletion(candidates: &[PruneCandidate]) -> Result<DeletionResult>
 }
 
 pub fn print_deletion_summary(result: &DeletionResult) {
-    if crate::display::is_silent() { return; }
+    if crate::display::is_silent() {
+        return;
+    }
     println!(
         "  {} Deleted {} ({} files) in {:.1}s",
         console::style("✓").green().bold(),
