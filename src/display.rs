@@ -6,6 +6,7 @@ use console::style;
 
 /// Print the Phase 1: Discovery summary.
 pub fn print_discovery(result: &ScanResult) {
+    if is_silent() { return; }
     println!();
     println!(
         "  {} {}",
@@ -30,6 +31,7 @@ pub fn print_discovery(result: &ScanResult) {
 
 /// Print the Phase 2: Simulation summary.
 pub fn print_simulation(result: &ScanResult) {
+    if is_silent() { return; }
     let savings = result.savings();
     let breakdown = result.category_breakdown();
 
@@ -109,6 +111,7 @@ pub fn print_simulation(result: &ScanResult) {
 
 /// Print the Phase 3: Confirmation (dry run).
 pub fn print_dry_run_confirmation(result: &ScanResult) {
+    if is_silent() { return; }
     let savings = result.savings();
     let pct = if result.total_size > 0 {
         (savings as f64 / result.total_size as f64 * 100.0) as u64
@@ -161,6 +164,7 @@ pub fn print_dry_run_confirmation(result: &ScanResult) {
 
 /// Print the global scan table.
 pub fn print_global_table(projects: &[(String, u64, u64, Option<u64>)]) {
+    if is_silent() { return; }
     println!();
     println!(
         "  {} {}",
@@ -222,6 +226,7 @@ pub fn print_global_table(projects: &[(String, u64, u64, Option<u64>)]) {
 
 /// Print the banner.
 pub fn print_banner() {
+    if is_silent() { return; }
     println!();
     println!(
         "  {}",
@@ -256,6 +261,7 @@ pub fn print_banner() {
 
 /// Print enhanced performance metrics dashboard (Step 14).
 pub fn print_performance_dashboard(metrics: &crate::profiler::PerformanceMetrics) {
+    if is_silent() { return; }
     println!();
     println!(
         "  {} {}",

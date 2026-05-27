@@ -208,6 +208,9 @@ pub fn enforce_policy(policy: &Policy, node_modules_path: &Path) -> Result<Polic
     use indicatif::{ProgressBar, ProgressStyle};
 
     let pb = ProgressBar::new_spinner();
+    if crate::display::is_silent() {
+        pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
     pb.set_style(
         ProgressStyle::with_template("  {spinner:.cyan} {msg}")
             .unwrap()

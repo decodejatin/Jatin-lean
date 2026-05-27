@@ -176,6 +176,9 @@ pub fn check_health(node_modules_path: &Path) -> Result<HealthReport> {
     use indicatif::{ProgressBar, ProgressStyle};
 
     let pb = ProgressBar::new_spinner();
+    if crate::display::is_silent() {
+        pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
     pb.set_style(
         ProgressStyle::with_template("  {spinner:.cyan} {msg}")
             .unwrap()

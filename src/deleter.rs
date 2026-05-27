@@ -28,6 +28,9 @@ pub fn execute_deletion(candidates: &[PruneCandidate]) -> Result<DeletionResult>
 
     let total_size: u64 = candidates.iter().map(|c| c.size).sum();
     let pb = ProgressBar::new(total_size);
+    if crate::display::is_silent() {
+        pb.set_draw_target(indicatif::ProgressDrawTarget::hidden());
+    }
     pb.set_style(
         ProgressStyle::with_template(
             "  {spinner:.green} Cleaning... [{bar:30.green/dim}] {percent}% | Deleted {msg}",
@@ -87,6 +90,7 @@ pub fn execute_deletion(candidates: &[PruneCandidate]) -> Result<DeletionResult>
 }
 
 pub fn print_deletion_summary(result: &DeletionResult) {
+    if crate::display::is_silent() { return; }
     println!(
         "  {} Deleted {} ({} files) in {:.1}s",
         console::style("✓").green().bold(),

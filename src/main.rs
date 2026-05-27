@@ -34,6 +34,15 @@
 #![allow(clippy::mut_from_ref)]
 #![allow(clippy::doc_lazy_continuation)]
 #![allow(unused_parens)]
+
+macro_rules! println {
+    ($($arg:tt)*) => {
+        if !$crate::display::is_silent() {
+            std::println!($($arg)*);
+        }
+    };
+}
+
 mod adaptive_engine;
 mod ai_context;
 mod allocator;
@@ -117,6 +126,10 @@ struct Cli {
     /// Output results as pretty-printed JSON
     #[arg(long, global = true)]
     json_pretty: bool,
+
+    /// Suppress human-readable stdout output and progress indicators
+    #[arg(long, short = 's', alias = "quiet", short_alias = 'q', global = true)]
+    silent: bool,
 
     /// Path to the project directory (defaults to current directory)
     #[arg(default_value = ".")]
@@ -229,12 +242,14 @@ fn main() -> Result<()> {
         json: args.json || args.json_pretty,
         pretty: args.json_pretty,
         verbose: args.verbose,
+        silent: args.silent,
     };
+    display::set_silent(ctx.silent || ctx.json);
 
     // Handle --init-config flag
     if let Some(config_path) = args.init_config {
         config::Config::create_example(&config_path)?;
-        if !ctx.json {
+        if ctx.human() {
             println!(
                 "  {} Example config file created: {}",
                 style("✓").green().bold(),
@@ -260,7 +275,7 @@ fn main() -> Result<()> {
     }
 
     // Default: run node_modules scan (backward compatible)
-    if !ctx.json {
+    if ctx.human() {
         display::print_banner();
     }
 

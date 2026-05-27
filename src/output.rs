@@ -9,6 +9,13 @@ pub struct OutputContext {
     pub json: bool,
     pub pretty: bool,
     pub verbose: bool,
+    pub silent: bool,
+}
+
+impl OutputContext {
+    pub fn human(&self) -> bool {
+        !self.json && !self.silent
+    }
 }
 
 #[derive(Serialize)]
@@ -50,7 +57,7 @@ pub fn output_result<T: Serialize>(command: &str, result: T, ctx: &OutputContext
             serde_json::to_string(&output)?
         };
 
-        println!("{}", json_str);
+        std::println!("{}", json_str);
     }
     // If not JSON, the caller should have already printed human-readable output
 
