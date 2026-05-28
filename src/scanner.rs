@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
+use memmap2::Mmap;
 
 /// Information about a file flagged for deletion.
 #[derive(Debug, Clone)]
@@ -194,8 +195,20 @@ pub fn scan_node_modules(
         // Parse package.json for entry points
         let pkg_json_path = pkg_path.join("package.json");
         if pkg_json_path.exists() {
-            if let Ok(content) = fs::read_to_string(&pkg_json_path) {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Ok(file) = std::fs::File::open(&pkg_json_path) {
+    let parsed_json = match unsafe { Mmap::map(&file) } {
+        Ok(mmap) => serde_json::from_slice::<serde_json::Value>(&mmap),
+
+        Err(_) => {
+            match fs::read_to_string(&pkg_json_path) {
+                Ok(content) => serde_json::from_str::<serde_json::Value>(&content),
+
+                Err(_) => return,
+            }
+        }
+    };
+
+    if let Ok(json) = parsed_json {
                     let entry_files = extract_entry_points(&json, pkg_path);
                     let mut wl = whitelisted_files.lock().unwrap();
                     for f in entry_files {
