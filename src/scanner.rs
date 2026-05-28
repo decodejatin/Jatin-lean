@@ -4,6 +4,7 @@
 //! collecting file metadata for the pruning engine.
 
 use crate::allocator::ScanArena;
+use crate::cache::{CachedPruneCandidate, ScanCache};
 use crate::profiler::{PackageTiming, Profiler};
 use crate::rules::{FileCategory, PruneRules};
 use anyhow::{Context, Result};
@@ -123,6 +124,10 @@ pub fn scan_node_modules(
     profiler: Option<&mut Profiler>,
 ) -> Result<ScanResult> {
     let _scan_start = Instant::now();
+    let mut scan_cache = ScanCache::load(node_modules_path);
+    if let Some(cached) = cached_scan_result(node_modules_path, &scan_cache) {
+        return Ok(cached);
+    }
 
     let total_files = AtomicU64::new(0);
     let total_size = AtomicU64::new(0);
@@ -298,14 +303,91 @@ pub fn scan_node_modules(
         }
     }
 
-    Ok(ScanResult {
+    let result = ScanResult {
         root: node_modules_path.to_path_buf(),
         total_files: total_files.load(Ordering::Relaxed),
         total_size: total_size.load(Ordering::Relaxed),
         candidates,
         total_packages: package_count,
         whitelisted_count: whitelisted.load(Ordering::Relaxed),
+    };
+
+    save_scan_cache(node_modules_path, &mut scan_cache, &result);
+
+    Ok(result)
+}
+
+fn cached_scan_result(node_modules_path: &Path, cache: &ScanCache) -> Option<ScanResult> {
+    let entry = cache.get_cached(node_modules_path)?;
+    let mut candidates = Vec::with_capacity(entry.candidates.len());
+    for cached in &entry.candidates {
+        candidates.push(PruneCandidate {
+            path: PathBuf::from(&cached.path),
+            size: cached.size,
+            category: decode_category(cached.category)?,
+            package_name: cached.package_name.clone(),
+        });
+    }
+
+    Some(ScanResult {
+        root: node_modules_path.to_path_buf(),
+        total_files: entry.file_count,
+        total_size: entry.total_size,
+        candidates,
+        total_packages: entry.total_packages,
+        whitelisted_count: entry.whitelisted_count,
     })
+}
+
+fn save_scan_cache(node_modules_path: &Path, cache: &mut ScanCache, result: &ScanResult) {
+    let cached_candidates = result
+        .candidates
+        .iter()
+        .map(|candidate| CachedPruneCandidate {
+            path: candidate.path.display().to_string(),
+            size: candidate.size,
+            category: encode_category(candidate.category),
+            package_name: candidate.package_name.clone(),
+        })
+        .collect();
+
+    cache.update_package_scan(
+        node_modules_path,
+        result.total_files,
+        result.total_size,
+        result.candidates.len() as u64,
+        result.savings(),
+        result.total_packages,
+        result.whitelisted_count,
+        cached_candidates,
+    );
+
+    let _ = cache.save(node_modules_path);
+}
+
+fn encode_category(category: FileCategory) -> u8 {
+    match category {
+        FileCategory::Documentation => 0,
+        FileCategory::TestAsset => 1,
+        FileCategory::BuildArtifact => 2,
+        FileCategory::SourceMap => 3,
+        FileCategory::CiConfig => 4,
+        FileCategory::TypeScriptSource => 5,
+        FileCategory::Example => 6,
+    }
+}
+
+fn decode_category(category: u8) -> Option<FileCategory> {
+    match category {
+        0 => Some(FileCategory::Documentation),
+        1 => Some(FileCategory::TestAsset),
+        2 => Some(FileCategory::BuildArtifact),
+        3 => Some(FileCategory::SourceMap),
+        4 => Some(FileCategory::CiConfig),
+        5 => Some(FileCategory::TypeScriptSource),
+        6 => Some(FileCategory::Example),
+        _ => None,
+    }
 }
 
 /// Extract the package name from its path.

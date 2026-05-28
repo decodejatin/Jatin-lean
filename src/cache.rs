@@ -4,27 +4,80 @@
 //! and skips re-scanning packages that haven't changed since the last scan.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use memmap2::Mmap;
+use rkyv::Deserialize as RkyvDeserialize;
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+const CACHE_VERSION: u32 = 2;
+
 /// A cached scan state for a single package.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub struct PackageCacheEntry {
     /// Hash of the package directory (based on file count + total mtime)
     pub hash: u64,
+    /// Total files found during the cached scan.
+    pub file_count: u64,
+    /// Total size of all files found during the cached scan.
+    pub total_size: u64,
     /// Number of candidate files last time
     pub candidate_count: u64,
     /// Total candidate size last time
     pub candidate_size: u64,
+    /// Total packages included in the cached scan.
+    pub total_packages: usize,
+    /// Number of whitelisted files found during the cached scan.
+    pub whitelisted_count: u64,
+    /// Cached candidates from the previous successful scan.
+    pub candidates: Vec<CachedPruneCandidate>,
     /// Timestamp of when this cache entry was created
     pub cached_at: u64,
 }
 
+/// A prune candidate stored in the disk cache.
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
+pub struct CachedPruneCandidate {
+    /// Absolute path to the candidate file.
+    pub path: String,
+    /// Size in bytes.
+    pub size: u64,
+    /// Compact category identifier, interpreted by the scanner.
+    pub category: u8,
+    /// Package that owns the candidate.
+    pub package_name: String,
+}
+
 /// The full scan cache database.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+#[archive(check_bytes)]
 pub struct ScanCache {
     /// Version of the cache format
     pub version: u32,
@@ -37,7 +90,7 @@ pub struct ScanCache {
 impl Default for ScanCache {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: CACHE_VERSION,
             packages: HashMap::new(),
             last_updated: 0,
         }
@@ -48,20 +101,16 @@ impl ScanCache {
     /// Get the cache file path for a given node_modules directory.
     pub fn cache_path(node_modules_path: &Path) -> PathBuf {
         let parent = node_modules_path.parent().unwrap_or(node_modules_path);
-        parent.join(".jatin-lean-cache.json")
+        parent.join(".jatin-lean").join("cache.bin")
     }
 
     /// Load the cache from disk, or create a new one.
     pub fn load(node_modules_path: &Path) -> Self {
-        let path = Self::cache_path(node_modules_path);
-        if path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(cache) = serde_json::from_str::<ScanCache>(&content) {
-                    return cache;
-                }
-            }
-        }
-        Self::default()
+        MappedScanCache::load(node_modules_path)
+            .and_then(|mapped| mapped.to_memory())
+            .ok()
+            .filter(|cache| cache.version == CACHE_VERSION)
+            .unwrap_or_default()
     }
 
     /// Save the cache to disk.
@@ -72,37 +121,65 @@ impl ScanCache {
             .as_secs();
 
         let path = Self::cache_path(node_modules_path);
-        let content = serde_json::to_string(self).context("Failed to serialize scan cache")?;
-        fs::write(&path, content)
-            .with_context(|| format!("Failed to write cache: {}", path.display()))?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create cache directory: {}", parent.display()))?;
+        }
+
+        let bytes = rkyv::to_bytes::<_, 256>(&*self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize scan cache: {:?}", e))?;
+        let tmp_path = path.with_extension("bin.tmp");
+        fs::write(&tmp_path, bytes.as_slice())
+            .with_context(|| format!("Failed to write cache: {}", tmp_path.display()))?;
+        fs::rename(&tmp_path, &path)
+            .with_context(|| format!("Failed to replace cache: {}", path.display()))?;
         Ok(())
     }
 
     /// Compute a fast hash of a package directory.
     /// Uses file count + sum of modification timestamps as a fingerprint.
     pub fn compute_package_hash(pkg_path: &Path) -> u64 {
-        let mut hash: u64 = 0;
-        let mut file_count: u64 = 0;
+        fn mix(mut hash: u64, value: u64) -> u64 {
+            hash ^= value;
+            hash = hash.wrapping_mul(0x100000001b3);
+            hash
+        }
 
-        if let Ok(entries) = fs::read_dir(pkg_path) {
-            for entry in entries.flatten() {
-                file_count += 1;
-                if let Ok(metadata) = entry.metadata() {
-                    if let Ok(modified) = metadata.modified() {
-                        let mtime = modified
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        hash = hash.wrapping_add(mtime);
+        fn visit(path: &Path, hash: &mut u64, file_count: &mut u64) {
+            let Ok(metadata) = fs::symlink_metadata(path) else {
+                return;
+            };
+
+            *file_count += 1;
+            *hash = mix(*hash, metadata.len());
+            if let Ok(modified) = metadata.modified() {
+                let nanos = modified
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as u64;
+                *hash = mix(*hash, nanos);
+            }
+
+            if metadata.is_dir() {
+                let Ok(entries) = fs::read_dir(path) else {
+                    return;
+                };
+                let mut entries: Vec<_> = entries.flatten().collect();
+                entries.sort_by_key(|entry| entry.file_name());
+                for entry in entries {
+                    let name = entry.file_name();
+                    for byte in name.to_string_lossy().bytes() {
+                        *hash = mix(*hash, byte as u64);
                     }
-                    hash = hash.wrapping_add(metadata.len());
+                    visit(&entry.path(), hash, file_count);
                 }
             }
         }
 
-        // Mix in file count for extra discrimination
-        hash = hash.wrapping_mul(31).wrapping_add(file_count);
-        hash
+        let mut hash = 0xcbf29ce484222325;
+        let mut file_count = 0;
+        visit(pkg_path, &mut hash, &mut file_count);
+        mix(hash, file_count)
     }
 
     /// Check if a package has changed since it was last cached.
@@ -119,6 +196,21 @@ impl ScanCache {
 
     /// Update the cache entry for a package.
     pub fn update_package(&mut self, pkg_path: &Path, candidate_count: u64, candidate_size: u64) {
+        self.update_package_scan(pkg_path, 0, 0, candidate_count, candidate_size, 0, 0, Vec::new());
+    }
+
+    /// Update the cache entry with full scan metadata.
+    pub fn update_package_scan(
+        &mut self,
+        pkg_path: &Path,
+        file_count: u64,
+        total_size: u64,
+        candidate_count: u64,
+        candidate_size: u64,
+        total_packages: usize,
+        whitelisted_count: u64,
+        candidates: Vec<CachedPruneCandidate>,
+    ) {
         let key = pkg_path.display().to_string();
         let hash = Self::compute_package_hash(pkg_path);
         let now = SystemTime::now()
@@ -130,8 +222,13 @@ impl ScanCache {
             key,
             PackageCacheEntry {
                 hash,
+                file_count,
+                total_size,
                 candidate_count,
                 candidate_size,
+                total_packages,
+                whitelisted_count,
+                candidates,
                 cached_at: now,
             },
         );
@@ -172,6 +269,35 @@ impl ScanCache {
     }
 }
 
+/// A memory-mapped cache file validated by rkyv before use.
+pub struct MappedScanCache {
+    mmap: Mmap,
+}
+
+impl MappedScanCache {
+    /// Load and validate a cache file by memory-mapping its bytes.
+    pub fn load(node_modules_path: &Path) -> Result<Self> {
+        let path = ScanCache::cache_path(node_modules_path);
+        let file =
+            File::open(&path).with_context(|| format!("Failed to open cache: {}", path.display()))?;
+        let mmap = unsafe { Mmap::map(&file) }
+            .with_context(|| format!("Failed to mmap cache: {}", path.display()))?;
+        rkyv::check_archived_root::<ScanCache>(&mmap[..])
+            .map_err(|e| anyhow::anyhow!("Invalid scan cache: {:?}", e))?;
+        Ok(Self { mmap })
+    }
+
+    /// Deserialize the validated archive into the in-memory cache layer.
+    pub fn to_memory(&self) -> Result<ScanCache> {
+        let archived = rkyv::check_archived_root::<ScanCache>(&self.mmap[..])
+            .map_err(|e| anyhow::anyhow!("Invalid scan cache: {:?}", e))?;
+        let mut deserializer = rkyv::Infallible;
+        archived
+            .deserialize(&mut deserializer)
+            .map_err(|e| anyhow::anyhow!("Failed to deserialize scan cache: {:?}", e))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,7 +306,7 @@ mod tests {
     #[test]
     fn test_scan_cache_default() {
         let cache = ScanCache::default();
-        assert_eq!(cache.version, 1);
+        assert_eq!(cache.version, CACHE_VERSION);
         assert!(cache.packages.is_empty());
     }
 
@@ -188,8 +314,7 @@ mod tests {
     fn test_compute_package_hash_empty_dir() -> Result<()> {
         let temp = TempDir::new()?;
         let hash = ScanCache::compute_package_hash(temp.path());
-        // Should produce a non-zero hash due to the file_count mixing
-        assert_eq!(hash, 0); // Empty dir → 0 files → 0 * 31 + 0 = 0
+        assert_ne!(hash, 0);
         Ok(())
     }
 
@@ -250,8 +375,13 @@ mod tests {
             "/nonexistent/path/package".to_string(),
             PackageCacheEntry {
                 hash: 12345,
+                file_count: 0,
+                total_size: 0,
                 candidate_count: 5,
                 candidate_size: 1024,
+                total_packages: 0,
+                whitelisted_count: 0,
+                candidates: Vec::new(),
                 cached_at: 0,
             },
         );
