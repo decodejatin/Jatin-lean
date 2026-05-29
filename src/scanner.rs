@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -142,11 +142,12 @@ pub fn scan_node_modules(
     // Phase 1: Discovery - find all packages
     let discovery_start = Instant::now();
     let mut packages: Vec<PathBuf> = Vec::new();
+    let mut visited_package_roots: HashSet<PathBuf> = HashSet::new();
     if node_modules_path.is_dir() {
         if let Ok(entries) = fs::read_dir(node_modules_path) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() {
+                if is_directory_or_directory_symlink(&path) {
                     let name = entry.file_name();
                     let name_str = name.to_str().unwrap_or("");
 
@@ -154,16 +155,22 @@ pub fn scan_node_modules(
                         // Scoped packages: @scope/package
                         if let Ok(scoped_entries) = fs::read_dir(&path) {
                             for scoped_entry in scoped_entries.flatten() {
-                                if scoped_entry.path().is_dir() {
-                                    packages.push(scoped_entry.path());
-                                }
+                                push_package_if_unvisited(
+                                    scoped_entry.path(),
+                                    &mut packages,
+                                    &mut visited_package_roots,
+                                );
                             }
                         }
                     } else if name_str != ".bin"
                         && name_str != ".cache"
                         && name_str != ".package-lock.json"
                     {
-                        packages.push(path);
+                        push_package_if_unvisited(
+                            path,
+                            &mut packages,
+                            &mut visited_package_roots,
+                        );
                     }
                 }
             }
@@ -306,6 +313,35 @@ pub fn scan_node_modules(
         total_packages: package_count,
         whitelisted_count: whitelisted.load(Ordering::Relaxed),
     })
+}
+
+fn is_directory_or_directory_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| {
+            let file_type = metadata.file_type();
+            file_type.is_dir() || file_type.is_symlink()
+        })
+        .unwrap_or(false)
+}
+
+fn push_package_if_unvisited(
+    path: PathBuf,
+    packages: &mut Vec<PathBuf>,
+    visited_package_roots: &mut HashSet<PathBuf>,
+) {
+    if !is_directory_or_directory_symlink(&path) {
+        return;
+    }
+
+    let Ok(canonical_root) = path.canonicalize() else {
+        return;
+    };
+
+    if !canonical_root.is_dir() || !visited_package_roots.insert(canonical_root) {
+        return;
+    }
+
+    packages.push(canonical_root);
 }
 
 /// Extract the package name from its path.

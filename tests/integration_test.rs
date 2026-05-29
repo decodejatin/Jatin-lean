@@ -8,6 +8,16 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
+#[cfg(unix)]
+fn create_dir_symlink(original: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(original, link)
+}
+
+#[cfg(windows)]
+fn create_dir_symlink(original: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(original, link)
+}
+
 /// Helper: create a mock node_modules with some packages.
 fn create_mock_node_modules(root: &Path) -> Result<()> {
     let nm = root.join("node_modules");
@@ -211,6 +221,46 @@ fn test_scan_result_savings() -> Result<()> {
     assert!(
         savings <= result.total_size,
         "Savings should not exceed total size"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_scan_handles_cyclic_symlink_packages() -> Result<()> {
+    let temp = TempDir::new()?;
+    let nm = temp.path().join("node_modules");
+    fs::create_dir_all(&nm)?;
+
+    let real_pkg = nm.join("real-pkg");
+    fs::create_dir_all(&real_pkg)?;
+    fs::write(
+        real_pkg.join("package.json"),
+        r#"{"name":"real-pkg","version":"1.0.0","main":"index.js"}"#,
+    )?;
+    fs::write(real_pkg.join("index.js"), "module.exports = {};")?;
+    fs::write(real_pkg.join("README.md"), "# real-pkg\n")?;
+
+    if create_dir_symlink(&real_pkg, &nm.join("linked-real-pkg")).is_err() {
+        eprintln!("skipping symlink scanner test because symlinks are unavailable");
+        return Ok(());
+    }
+
+    let cycle_a = nm.join("cycle-a");
+    let cycle_b = nm.join("cycle-b");
+    create_dir_symlink(&cycle_b, &cycle_a)?;
+    create_dir_symlink(&cycle_a, &cycle_b)?;
+
+    let rules = jatin_lean::rules::PruneRules::new();
+    let result = jatin_lean::scanner::scan_node_modules(&nm, &rules, None)?;
+
+    assert_eq!(
+        result.total_packages, 1,
+        "the real package and its symlink alias should be scanned once"
+    );
+    assert!(
+        result.total_files > 0,
+        "scanner should finish and report files from the real package"
     );
 
     Ok(())
