@@ -122,8 +122,9 @@ impl ScanCache {
 
         let path = Self::cache_path(node_modules_path);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create cache directory: {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create cache directory: {}", parent.display())
+            })?;
         }
 
         let bytes = rkyv::to_bytes::<_, 256>(&*self)
@@ -196,7 +197,16 @@ impl ScanCache {
 
     /// Update the cache entry for a package.
     pub fn update_package(&mut self, pkg_path: &Path, candidate_count: u64, candidate_size: u64) {
-        self.update_package_scan(pkg_path, 0, 0, candidate_count, candidate_size, 0, 0, Vec::new());
+        self.update_package_scan(
+            pkg_path,
+            0,
+            0,
+            candidate_count,
+            candidate_size,
+            0,
+            0,
+            Vec::new(),
+        );
     }
 
     /// Update the cache entry with full scan metadata.
@@ -278,8 +288,8 @@ impl MappedScanCache {
     /// Load and validate a cache file by memory-mapping its bytes.
     pub fn load(node_modules_path: &Path) -> Result<Self> {
         let path = ScanCache::cache_path(node_modules_path);
-        let file =
-            File::open(&path).with_context(|| format!("Failed to open cache: {}", path.display()))?;
+        let file = File::open(&path)
+            .with_context(|| format!("Failed to open cache: {}", path.display()))?;
         let mmap = unsafe { Mmap::map(&file) }
             .with_context(|| format!("Failed to mmap cache: {}", path.display()))?;
         rkyv::check_archived_root::<ScanCache>(&mmap[..])
