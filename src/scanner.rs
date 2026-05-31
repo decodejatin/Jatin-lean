@@ -6,7 +6,7 @@
 use crate::allocator::ScanArena;
 use crate::profiler::{PackageTiming, Profiler};
 use crate::rules::{FileCategory, PruneRules};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
@@ -127,7 +127,7 @@ pub fn scan_node_modules(
     let total_files = AtomicU64::new(0);
     let total_size = AtomicU64::new(0);
     let whitelisted = AtomicU64::new(0);
-    let candidates = Arc::new(Mutex::new(Vec::new()));
+    let (candidate_sender, candidate_receiver) = crossbeam::channel::unbounded();
 
     // Create progress bar
     let pb = ProgressBar::new_spinner();
@@ -255,7 +255,7 @@ pub fn scan_node_modules(
                             category,
                             package_name: pkg_name_ref.to_string(),
                         };
-                        candidates.lock().unwrap().push(candidate);
+                        let _ = candidate_sender.send(candidate);
                     }
                 }
             }
@@ -273,16 +273,13 @@ pub fn scan_node_modules(
         };
         package_timings.lock().unwrap().push(timing);
     });
+    drop(candidate_sender);
 
     let parsing_duration = parsing_start.elapsed();
 
     pb.finish_and_clear();
 
-    let candidates = Arc::try_unwrap(candidates)
-        .map_err(|_| anyhow::anyhow!("Failed to unwrap candidates"))
-        .context("Failed to collect candidates")?
-        .into_inner()
-        .map_err(|e| anyhow::anyhow!("Mutex poisoned: {}", e))?;
+    let candidates: Vec<PruneCandidate> = candidate_receiver.into_iter().collect();
 
     // Record metrics in profiler
     if let Some(prof) = profiler {
@@ -671,5 +668,52 @@ mod tests {
             high_risk.risk_label(),
             "HIGH — TypeScript sources included (declarations kept)"
         );
+    }
+
+    #[test]
+    fn test_scan_collects_parallel_candidates_from_many_packages() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let node_modules = temp.path().join("node_modules");
+        std::fs::create_dir(&node_modules)?;
+
+        for index in 0..32 {
+            let package = node_modules.join(format!("pkg-{index}"));
+            std::fs::create_dir(&package)?;
+            std::fs::write(package.join("package.json"), r#"{"main":"index.js"}"#)?;
+            std::fs::write(package.join("index.js"), "module.exports = true;\n")?;
+            std::fs::write(package.join("README.md"), "# fixture\n")?;
+            std::fs::write(
+                package.join("feature.test.js"),
+                "test('fixture', () => {});\n",
+            )?;
+        }
+
+        let result = scan_node_modules(&node_modules, &PruneRules::new(), None)?;
+
+        assert_eq!(result.total_packages, 32);
+        assert_eq!(result.total_files, 128);
+        assert_eq!(result.candidates.len(), 64);
+        assert_eq!(
+            result
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.category == FileCategory::Documentation)
+                .count(),
+            32
+        );
+        assert_eq!(
+            result
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.category == FileCategory::TestAsset)
+                .count(),
+            32
+        );
+        assert!(result
+            .candidates
+            .iter()
+            .all(|candidate| candidate.package_name.starts_with("pkg-")));
+
+        Ok(())
     }
 }
