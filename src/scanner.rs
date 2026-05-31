@@ -166,11 +166,7 @@ pub fn scan_node_modules(
                         && name_str != ".cache"
                         && name_str != ".package-lock.json"
                     {
-                        push_package_if_unvisited(
-                            path,
-                            &mut packages,
-                            &mut visited_package_roots,
-                        );
+                        push_package_if_unvisited(path, &mut packages, &mut visited_package_roots);
                     }
                 }
             }
@@ -337,7 +333,7 @@ fn push_package_if_unvisited(
         return;
     };
 
-    if !canonical_root.is_dir() || !visited_package_roots.insert(canonical_root) {
+    if !canonical_root.is_dir() || !visited_package_roots.insert(canonical_root.clone()) {
         return;
     }
 

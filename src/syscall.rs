@@ -190,7 +190,7 @@ impl BatchDeleter {
 
         #[cfg(not(target_os = "linux"))]
         {
-            return DeleteStrategy::Parallel;
+            DeleteStrategy::Parallel
         }
     }
 
@@ -348,7 +348,7 @@ pub fn fast_dir_size(path: &Path) -> u64 {
 
     #[cfg(not(target_os = "linux"))]
     {
-        return fast_dir_size_generic(path);
+        fast_dir_size_generic(path)
     }
 }
 
@@ -397,7 +397,7 @@ fn fast_dir_size_generic(path: &Path) -> u64 {
         .build();
 
     for entry in walker.flatten() {
-        if entry.file_type().map_or(false, |ft| ft.is_file()) {
+        if entry.file_type().is_some_and(|ft| ft.is_file()) {
             if let Ok(meta) = entry.metadata() {
                 total += meta.len();
             }
@@ -416,7 +416,7 @@ pub fn cow_copy(src: &Path, dst: &Path) -> Result<()> {
 
     #[cfg(target_os = "macos")]
     {
-        return cow_copy_macos(src, dst);
+        cow_copy_macos(src, dst)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]

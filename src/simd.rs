@@ -22,20 +22,23 @@ const FNV_PRIME: u64 = 0x100000001b3;
 /// On x86_64 with SSE2+, processes 16 bytes per iteration.
 /// Falls back to scalar 8-byte-at-a-time on other architectures.
 pub fn fast_hash(data: &[u8]) -> u64 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if is_x86_feature_detected!("sse2") {
-            return unsafe { fast_hash_sse2(data) };
-        }
-    }
-
     #[cfg(target_arch = "aarch64")]
     {
-        return fast_hash_neon(data);
+        fast_hash_neon(data)
     }
 
-    // Scalar fallback
-    fast_hash_scalar(data)
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("sse2") {
+                return unsafe { fast_hash_sse2(data) };
+            }
+        }
+
+        // Scalar fallback
+        fast_hash_scalar(data)
+    }
 }
 
 /// Scalar FNV-1a with 8-byte unrolled loop.
