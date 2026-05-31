@@ -410,9 +410,8 @@ pub fn print_timer_info() {
     #[cfg(target_arch = "aarch64")]
     {
         println!(
-            "  {} Timer source: {}",
-            style("◉").dim(),
-            "cntvct_el0 / clock_gettime"
+            "  {} Timer source: cntvct_el0 / clock_gettime",
+            style("◉").dim()
         );
     }
 

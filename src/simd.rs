@@ -31,11 +31,14 @@ pub fn fast_hash(data: &[u8]) -> u64 {
 
     #[cfg(target_arch = "aarch64")]
     {
-        return fast_hash_neon(data);
+        fast_hash_neon(data)
     }
 
-    // Scalar fallback
-    fast_hash_scalar(data)
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        // Scalar fallback
+        fast_hash_scalar(data)
+    }
 }
 
 /// Scalar FNV-1a with 8-byte unrolled loop.

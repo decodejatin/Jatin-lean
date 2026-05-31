@@ -117,9 +117,12 @@ impl SimdJsonScanner {
         }
         #[cfg(target_arch = "aarch64")]
         {
-            return 16;
+            16
         } // NEON is always 128-bit
-        8 // Fallback: process 8 bytes at a time
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            8 // Fallback: process 8 bytes at a time
+        }
     }
 
     /// Scan JSON bytes for structural characters using SIMD-style batch processing.
