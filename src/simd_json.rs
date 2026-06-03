@@ -476,4 +476,112 @@ mod tests {
         assert!(scan.kv_count >= 2000);
         assert!(scan.throughput_mbs() > 0.0 || scan.scan_duration.as_nanos() == 0);
     }
+
+    #[test]
+    fn test_massive_package_manifest_scan_stays_stable() {
+        let mut json = String::from(r#"{"name":"huge-fixture","version":"1.0.0","dependencies":{"#);
+
+        for i in 0..200_000 {
+            if i > 0 {
+                json.push(',');
+            }
+            json.push_str(&format!(
+                r#""package-{}":"{}.{}.{}""#,
+                i,
+                i % 10,
+                i % 100,
+                i % 1000
+            ));
+        }
+        json.push_str(r#"},"scripts":{"test":"cargo test","bench":"jatin-lean bench json"}}"#);
+
+        assert!(
+            json.len() > 5 * 1024 * 1024,
+            "fixture should exercise 5MB+ package manifest path"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("large fixture should remain valid JSON");
+        assert_eq!(parsed["name"], "huge-fixture");
+
+        let scanner = SimdJsonScanner::new();
+        let scan = scanner.scan(json.as_bytes());
+        assert_eq!(scan.bytes_scanned, json.len());
+        assert!(scan.kv_count >= 200_004);
+        assert!(scan.string_count >= 400_000);
+    }
+
+    #[test]
+    fn test_malformed_json_scan_recovers_to_standard_parser_error() {
+        let malformed_inputs: [&[u8]; 3] = [
+            br#"{"name":"broken","dependencies":{"a":"1.0.0"}"#,
+            br#"{"name":"trailing-comma","dependencies":{"a":"1.0.0",}}"#,
+            br#"{"name":"bad-array","files":["index.js","lib.js",]}"#,
+        ];
+        let scanner = SimdJsonScanner::new();
+
+        for input in malformed_inputs {
+            let scan = scanner.scan(input);
+            assert_eq!(scan.bytes_scanned, input.len());
+            assert!(
+                !scan.indices.is_empty(),
+                "scanner should return structural data for malformed input without panicking"
+            );
+
+            let parsed: Result<serde_json::Value, _> = serde_json::from_slice(input);
+            assert!(
+                parsed.is_err(),
+                "standard parser fallback should reject malformed JSON cleanly"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unicode_escaped_strings_and_nested_arrays() {
+        let json = br#"{
+            "name":"unicode-fixture",
+            "description":"handles \"quotes\", backslashes \\\\, emoji \uD83D\uDE80, and Hindi \u0928\u092e\u0938\u094d\u0924\u0947",
+            "exports":{
+                ".":[
+                    {"import":"./dist/index.mjs","conditions":["node","default"]},
+                    {"require":"./dist/index.cjs","conditions":["legacy",["deep",["deeper"]]]}
+                ]
+            },
+            "keywords":["simd","json","unicode","escaped"]
+        }"#;
+
+        let scanner = SimdJsonScanner::new();
+        let scan = scanner.scan(json);
+        let parsed: serde_json::Value =
+            serde_json::from_slice(json).expect("unicode and escaped fixture should parse");
+        let keys = scanner.extract_keys(json, &scan);
+
+        assert_eq!(parsed["name"], "unicode-fixture");
+        assert!(keys.contains(&"description"));
+        assert!(keys.contains(&"exports"));
+        assert!(keys.contains(&"keywords"));
+        assert!(scan.max_depth >= 5);
+        assert!(scan.array_element_count >= 8);
+    }
+
+    #[test]
+    fn test_small_chunk_fallback_matches_detected_simd_scan() {
+        let json = br#"{
+            "name":"fallback-fixture",
+            "dependencies":{"alpha":"1.0.0","beta":"2.0.0"},
+            "nested":[{"a":1},{"b":[true,false,null]}]
+        }"#;
+        serde_json::from_slice::<serde_json::Value>(json).expect("fixture should be valid JSON");
+
+        let detected = SimdJsonScanner::new().scan(json);
+        let scalar_fallback = SimdJsonScanner { chunk_size: 1 }.scan(json);
+
+        assert_eq!(scalar_fallback.bytes_scanned, detected.bytes_scanned);
+        assert_eq!(scalar_fallback.indices.len(), detected.indices.len());
+        assert_eq!(scalar_fallback.kv_count, detected.kv_count);
+        assert_eq!(scalar_fallback.max_depth, detected.max_depth);
+        assert_eq!(
+            scalar_fallback.array_element_count,
+            detected.array_element_count
+        );
+    }
 }
