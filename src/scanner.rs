@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -142,6 +142,7 @@ pub fn scan_node_modules(
     // Phase 1: Discovery - find all packages
     let discovery_start = Instant::now();
     let mut packages: Vec<PathBuf> = Vec::new();
+    let mut visited_package_roots: HashSet<PathBuf> = HashSet::new();
     if node_modules_path.is_dir() {
         if let Ok(entries) = fs::read_dir(node_modules_path) {
             for entry in entries.flatten() {
@@ -154,16 +155,18 @@ pub fn scan_node_modules(
                         // Scoped packages: @scope/package
                         if let Ok(scoped_entries) = fs::read_dir(&path) {
                             for scoped_entry in scoped_entries.flatten() {
-                                if scoped_entry.path().is_dir() {
-                                    packages.push(scoped_entry.path());
-                                }
+                                push_package_if_new(
+                                    scoped_entry.path(),
+                                    &mut visited_package_roots,
+                                    &mut packages,
+                                );
                             }
                         }
                     } else if name_str != ".bin"
                         && name_str != ".cache"
                         && name_str != ".package-lock.json"
                     {
-                        packages.push(path);
+                        push_package_if_new(path, &mut visited_package_roots, &mut packages);
                     }
                 }
             }
@@ -306,6 +309,25 @@ pub fn scan_node_modules(
         total_packages: package_count,
         whitelisted_count: whitelisted.load(Ordering::Relaxed),
     })
+}
+
+/// Add a package root only once by its physical filesystem target.
+///
+/// Package managers commonly create symlinks in `node_modules`. Canonicalizing
+/// before scheduling a package prevents recursive aliases from being scanned
+/// repeatedly and skips broken or cyclic symlinks that cannot resolve safely.
+fn push_package_if_new(
+    pkg_path: PathBuf,
+    visited_package_roots: &mut HashSet<PathBuf>,
+    packages: &mut Vec<PathBuf>,
+) {
+    let Ok(physical_path) = fs::canonicalize(&pkg_path) else {
+        return;
+    };
+
+    if visited_package_roots.insert(physical_path) {
+        packages.push(pkg_path);
+    }
 }
 
 /// Extract the package name from its path.
