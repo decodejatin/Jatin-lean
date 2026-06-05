@@ -21,6 +21,7 @@ pub struct ScanResult {
     pub candidates_count: u32,
     pub potential_savings: f64,
     pub savings_percentage: f64,
+    pub candidates_buffer: Option<Buffer>,
 }
 
 /// Health check result
@@ -81,6 +82,38 @@ pub fn scan_node_modules(path: String) -> Result<ScanResult> {
         0.0
     };
 
+    // Serialize candidates into a binary buffer
+    let mut buffer_data = Vec::new();
+    // [total_records (4 bytes)]
+    buffer_data.extend_from_slice(&(result.candidates.len() as u32).to_le_bytes());
+    
+    for candidate in &result.candidates {
+        let path_str = candidate.path.to_string_lossy();
+        let path_bytes = path_str.as_bytes();
+        let path_len = path_bytes.len() as u16;
+        
+        let pkg_bytes = candidate.package_name.as_bytes();
+        let pkg_len = pkg_bytes.len() as u16;
+        
+        // category as u8
+        let cat_idx = match candidate.category {
+            crate::rules::FileCategory::Documentation => 0,
+            crate::rules::FileCategory::TestAsset => 1,
+            crate::rules::FileCategory::BuildArtifact => 2,
+            crate::rules::FileCategory::SourceMap => 3,
+            crate::rules::FileCategory::CiConfig => 4,
+            crate::rules::FileCategory::TypeScriptSource => 5,
+            crate::rules::FileCategory::Example => 6,
+        };
+        
+        buffer_data.extend_from_slice(&path_len.to_le_bytes());
+        buffer_data.extend_from_slice(path_bytes);
+        buffer_data.extend_from_slice(&candidate.size.to_le_bytes());
+        buffer_data.push(cat_idx);
+        buffer_data.extend_from_slice(&pkg_len.to_le_bytes());
+        buffer_data.extend_from_slice(pkg_bytes);
+    }
+
     Ok(ScanResult {
         total_files: result.total_files as u32,
         total_size: result.total_size as f64,
@@ -88,6 +121,7 @@ pub fn scan_node_modules(path: String) -> Result<ScanResult> {
         candidates_count: result.candidates.len() as u32,
         potential_savings: savings as f64,
         savings_percentage: savings_pct,
+        candidates_buffer: Some(buffer_data.into()),
     })
 }
 

@@ -32,12 +32,71 @@ try {
 }
 
 /**
+ * Unpack binary candidate buffer
+ * @param {Buffer} buffer - Raw binary payload
+ * @returns {Array<Object>} List of candidate objects
+ */
+function unpackCandidates(buffer) {
+  if (!buffer || buffer.length < 4) return [];
+  const totalRecords = buffer.readUInt32LE(0);
+  let offset = 4;
+  const candidates = [];
+  
+  const categories = [
+    'Documentation',
+    'TestAsset',
+    'BuildArtifact',
+    'SourceMap',
+    'CiConfig',
+    'TypeScriptSource',
+    'Example'
+  ];
+  
+  for (let i = 0; i < totalRecords; i++) {
+    if (offset >= buffer.length) break;
+    
+    const pathLen = buffer.readUInt16LE(offset);
+    offset += 2;
+    
+    const pathStr = buffer.toString('utf8', offset, offset + pathLen);
+    offset += pathLen;
+    
+    const size = Number(buffer.readBigUInt64LE(offset));
+    offset += 8;
+    
+    const catIdx = buffer.readUInt8(offset);
+    offset += 1;
+    const category = categories[catIdx] || 'Unknown';
+    
+    const pkgLen = buffer.readUInt16LE(offset);
+    offset += 2;
+    
+    const packageName = buffer.toString('utf8', offset, offset + pkgLen);
+    offset += pkgLen;
+    
+    candidates.push({
+      path: pathStr,
+      size,
+      category,
+      packageName
+    });
+  }
+  
+  return candidates;
+}
+
+/**
  * Scan node_modules directory for optimization opportunities
  * @param {string} path - Path to project directory
  * @returns {Promise<ScanResult>}
  */
 async function scanNodeModules(projectPath = '.') {
-  return nativeBinding.scanNodeModules(projectPath);
+  const result = await nativeBinding.scanNodeModules(projectPath);
+  if (result.candidatesBuffer) {
+    result.candidates = unpackCandidates(result.candidatesBuffer);
+    delete result.candidatesBuffer;
+  }
+  return result;
 }
 
 /**
