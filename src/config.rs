@@ -4,12 +4,61 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
+
+/// Predefined pruning safety profiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PruneProfile {
+    /// Safest tier: CI configuration and obvious test assets only.
+    Conservative,
+    /// Default tier: docs, examples, source maps, CI files, and test assets.
+    Balanced,
+    /// Highest savings tier: every known category, including build and TS sources.
+    Aggressive,
+}
+
+impl Default for PruneProfile {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
+impl fmt::Display for PruneProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Conservative => "conservative",
+            Self::Balanced => "balanced",
+            Self::Aggressive => "aggressive",
+        })
+    }
+}
+
+impl FromStr for PruneProfile {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.to_ascii_lowercase().as_str() {
+            "conservative" => Ok(Self::Conservative),
+            "balanced" => Ok(Self::Balanced),
+            "aggressive" => Ok(Self::Aggressive),
+            _ => Err(format!(
+                "invalid profile '{value}', expected conservative, balanced, or aggressive"
+            )),
+        }
+    }
+}
 
 /// Configuration structure matching rules.toml format
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Predefined pruning profile to apply before custom rule overrides.
+    #[serde(default)]
+    pub profile: PruneProfile,
+
     /// Whether to completely override default rules instead of merging
     #[serde(default)]
     pub override_defaults: bool,
@@ -152,6 +201,7 @@ fn default_dist_cache_timeout() -> u64 {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            profile: PruneProfile::default(),
             keep_license: false,
             override_defaults: false,
             doc_files: vec![],
@@ -264,6 +314,12 @@ impl Config {
     pub fn generate_sample() -> String {
         r#"# jatin-lean configuration file
 # Customize what gets deleted from node_modules
+
+# Predefined pruning profile:
+# - conservative: CI/CD config and obvious test assets only
+# - balanced: documentation, examples, source maps, CI/CD config, and tests
+# - aggressive: all known categories, including build artifacts and TypeScript sources
+profile = "balanced"
 
 # If true, ignores all built-in rules and only uses the ones defined here.
 # If false, these rules are added to the built-in defaults.
@@ -388,6 +444,7 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = Config::default();
+        assert_eq!(config.profile, PruneProfile::Balanced);
         assert!(!config.override_defaults);
         assert!(config.doc_files.is_empty());
         assert!(config.test_dirs.is_empty());
@@ -396,6 +453,7 @@ mod tests {
     #[test]
     fn test_config_generate_sample() {
         let sample = Config::generate_sample();
+        assert!(sample.contains("profile = \"balanced\""));
         assert!(sample.contains("override_defaults"));
         assert!(sample.contains("doc_files"));
         assert!(sample.contains("test_dirs"));
@@ -422,6 +480,7 @@ mod tests {
         let config_path = temp_dir.path().join("test.toml");
 
         let toml_content = r#"
+profile = "aggressive"
 override_defaults = true
 doc_files = ["CUSTOM_README.md"]
 test_dirs = ["custom_tests"]
@@ -429,6 +488,7 @@ test_dirs = ["custom_tests"]
         fs::write(&config_path, toml_content)?;
 
         let config = Config::from_file(&config_path)?;
+        assert_eq!(config.profile, PruneProfile::Aggressive);
         assert!(config.override_defaults);
         assert_eq!(config.doc_files, vec!["CUSTOM_README.md"]);
         assert_eq!(config.test_dirs, vec!["custom_tests"]);

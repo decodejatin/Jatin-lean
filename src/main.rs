@@ -86,6 +86,7 @@ mod zero_copy_serde;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use config::PruneProfile;
 use console::style;
 use dialoguer::Confirm;
 use std::path::{Path, PathBuf};
@@ -154,9 +155,13 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     init_config: Option<PathBuf>,
 
-    /// Enable performance profiling
+    /// Pruning profile to apply (conservative, balanced, aggressive)
+    #[arg(long, value_name = "PROFILE")]
+    profile: Option<PruneProfile>,
+
+    /// Enable performance profiling output
     #[arg(long)]
-    profile: bool,
+    perf_profile: bool,
 
     /// Create a snapshot before deletion (for undo support)
     #[arg(long)]
@@ -278,6 +283,7 @@ fn main() -> Result<()> {
             args.config.as_deref(),
             args.keep_license,
             args.profile,
+            args.perf_profile,
             args.snapshot,
             args.export.as_deref(),
         )?;
@@ -308,7 +314,7 @@ pub fn run_local_mode_from_args(
     yes: bool,
     verbose: bool,
     keep_license: bool,
-    profile: bool,
+    perf_profile: bool,
     snapshot: bool,
     export: Option<&std::path::Path>,
     _ctx: &output::OutputContext,
@@ -321,7 +327,8 @@ pub fn run_local_mode_from_args(
         verbose,
         None,
         keep_license,
-        profile,
+        None,
+        perf_profile,
         snapshot,
         export,
     )
@@ -335,11 +342,12 @@ fn run_local_mode(
     verbose: bool,
     config_path: Option<&Path>,
     keep_license: bool,
-    profile: bool,
+    profile: Option<PruneProfile>,
+    perf_profile: bool,
     create_snapshot: bool,
     export_path: Option<&Path>,
 ) -> Result<()> {
-    let mut profiler = profiler::Profiler::with_profiling(profile);
+    let mut profiler = profiler::Profiler::with_profiling(perf_profile);
     let overall_start = Instant::now();
 
     // Find node_modules
@@ -372,15 +380,22 @@ fn run_local_mode(
     profiler.start_span("Config Loading");
     let mut config = config::Config::load(config_path, project_path)?;
 
+    let mut effective_config = config.take().unwrap_or_default();
+
     // Apply --keep-license flag to config
-    if let Some(ref mut cfg) = config {
-        cfg.keep_license = keep_license;
+    effective_config.keep_license = keep_license;
+
+    if let Some(profile) = profile {
+        effective_config.profile = profile;
     }
 
-    if let Some(ref _cfg) = config {
+    if config_path.is_some()
+        || project_path.join("jatin-lean.toml").exists()
+        || project_path.join(".jatin-lean.toml").exists()
+    {
         let source = if config_path.is_some() {
             "custom config"
-        } else if Path::new("./jatin-lean.toml").exists() {
+        } else if project_path.join("jatin-lean.toml").exists() {
             "./jatin-lean.toml"
         } else {
             "~/.config/jatin-lean/rules.toml"
@@ -392,11 +407,16 @@ fn run_local_mode(
             style(source).cyan()
         );
     }
+    println!(
+        "  {} Using {} pruning profile",
+        style("◉").cyan(),
+        style(effective_config.profile).cyan()
+    );
     profiler.end_span(0);
 
     // Phase 1: Discovery
     profiler.start_span("Discovery (Scan)");
-    let rules = rules::PruneRules::new_with_config(config);
+    let rules = rules::PruneRules::new_with_config(Some(effective_config));
     let scan_result = scanner::scan_node_modules(&nm_path, &rules, None)
         .context("Failed to scan node_modules")?;
     profiler.end_span(scan_result.total_files);
@@ -599,7 +619,7 @@ fn run_local_mode(
     }
 
     // Print profiling report
-    if profile {
+    if perf_profile {
         profiler::print_profiling_report(&profiler);
         // Enhanced dashboard (Step 14)
         let metrics = profiler.clone().finalize();

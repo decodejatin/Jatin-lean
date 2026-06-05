@@ -6,6 +6,8 @@
 use regex::RegexSet;
 use std::path::Path;
 
+use crate::config::PruneProfile;
+
 /// Categories of files that can be pruned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileCategory {
@@ -53,8 +55,29 @@ impl FileCategory {
     }
 }
 
+impl PruneProfile {
+    fn includes(self, category: FileCategory) -> bool {
+        match self {
+            PruneProfile::Conservative => {
+                matches!(category, FileCategory::CiConfig | FileCategory::TestAsset)
+            }
+            PruneProfile::Balanced => matches!(
+                category,
+                FileCategory::Documentation
+                    | FileCategory::TestAsset
+                    | FileCategory::SourceMap
+                    | FileCategory::CiConfig
+                    | FileCategory::Example
+            ),
+            PruneProfile::Aggressive => true,
+        }
+    }
+}
+
 /// File patterns organized by category.
 pub struct PruneRules {
+    /// Predefined safety profile controlling which categories are enabled.
+    pub profile: PruneProfile,
     /// Documentation file patterns (checked by filename)
     pub doc_files: Vec<String>,
     /// Documentation directories
@@ -96,6 +119,7 @@ impl PruneRules {
 
     pub fn new_with_config(config: Option<crate::config::Config>) -> Self {
         let mut rules = Self {
+            profile: PruneProfile::Balanced,
             // ── Documentation ──────────────────────────────
             doc_files: vec![
                 "README.md",
@@ -253,6 +277,8 @@ impl PruneRules {
 
         // Apply custom config if provided
         if let Some(cfg) = config {
+            rules.profile = cfg.profile;
+
             // Apply keep_license from config
             rules.keep_license = cfg.keep_license;
 
@@ -361,6 +387,14 @@ impl PruneRules {
         lower.starts_with("license") || lower.starts_with("licence")
     }
 
+    fn category(&self, category: FileCategory) -> Option<FileCategory> {
+        if self.profile.includes(category) {
+            Some(category)
+        } else {
+            None
+        }
+    }
+
     /// Classify a file path into a category, or None if it should be kept.
     ///
     /// The `rel_path` should be relative to the package directory within node_modules.
@@ -390,39 +424,39 @@ impl PruneRules {
             let dir_name = component.as_os_str().to_str().unwrap_or("");
 
             if self.test_dirs.iter().any(|d| d == dir_name) {
-                return Some(FileCategory::TestAsset);
+                return self.category(FileCategory::TestAsset);
             }
             if self.doc_dirs.iter().any(|d| d == dir_name) {
                 if dir_name == ".github" {
-                    return Some(FileCategory::CiConfig);
+                    return self.category(FileCategory::CiConfig);
                 }
-                return Some(FileCategory::Documentation);
+                return self.category(FileCategory::Documentation);
             }
             if self.ci_dirs.iter().any(|d| d == dir_name) {
-                return Some(FileCategory::CiConfig);
+                return self.category(FileCategory::CiConfig);
             }
             if self.example_dirs.iter().any(|d| d == dir_name) {
-                return Some(FileCategory::Example);
+                return self.category(FileCategory::Example);
             }
             // build dirs — but only if not the package root build
             if self.build_dirs.iter().any(|d| d == dir_name) {
-                return Some(FileCategory::BuildArtifact);
+                return self.category(FileCategory::BuildArtifact);
             }
         }
 
         // ── Check filenames (documentation) ──
         if self.doc_files.iter().any(|f| f == file_name) {
-            return Some(FileCategory::Documentation);
+            return self.category(FileCategory::Documentation);
         }
 
         // ── Check CI config files ──
         if self.ci_files.iter().any(|f| f == file_name) {
-            return Some(FileCategory::CiConfig);
+            return self.category(FileCategory::CiConfig);
         }
 
         // ── Check build artifact filenames ──
         if self.build_files.iter().any(|f| f == file_name) {
-            return Some(FileCategory::BuildArtifact);
+            return self.category(FileCategory::BuildArtifact);
         }
 
         // ── Check extensions ──
@@ -431,27 +465,27 @@ impl PruneRules {
         // Source maps (check before general extension checks since .js.map contains .map)
         for ext in &self.map_extensions {
             if path_str.ends_with(ext) {
-                return Some(FileCategory::SourceMap);
+                return self.category(FileCategory::SourceMap);
             }
         }
 
         // Build artifact extensions
         for ext in &self.build_extensions {
             if file_name.ends_with(ext) {
-                return Some(FileCategory::BuildArtifact);
+                return self.category(FileCategory::BuildArtifact);
             }
         }
 
         // Test file patterns (regex)
         if self.test_file_regex.is_match(file_name) {
-            return Some(FileCategory::TestAsset);
+            return self.category(FileCategory::TestAsset);
         }
 
         // TypeScript sources (but NOT .d.ts declaration files)
         if !file_name.ends_with(".d.ts") && !file_name.ends_with(".d.tsx") {
             for ext in &self.ts_source_extensions {
                 if file_name.ends_with(ext) {
-                    return Some(FileCategory::TypeScriptSource);
+                    return self.category(FileCategory::TypeScriptSource);
                 }
             }
         }
@@ -463,7 +497,15 @@ impl PruneRules {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use std::path::PathBuf;
+
+    fn rules_with_profile(profile: PruneProfile) -> PruneRules {
+        PruneRules::new_with_config(Some(Config {
+            profile,
+            ..Default::default()
+        }))
+    }
 
     #[test]
     fn test_readme_classified_as_documentation() {
@@ -502,7 +544,7 @@ mod tests {
 
     #[test]
     fn test_ts_source_classified() {
-        let rules = PruneRules::new();
+        let rules = rules_with_profile(PruneProfile::Aggressive);
         let path = PathBuf::from("src/utils.ts");
         assert_eq!(rules.classify(&path), Some(FileCategory::TypeScriptSource));
     }
@@ -545,7 +587,7 @@ mod tests {
 
     #[test]
     fn test_build_files_classified() {
-        let rules = PruneRules::new();
+        let rules = rules_with_profile(PruneProfile::Aggressive);
 
         // Build files
         assert_eq!(
@@ -643,6 +685,60 @@ mod tests {
         assert_eq!(FileCategory::SourceMap.risk_level(), 1);
         assert_eq!(FileCategory::BuildArtifact.risk_level(), 1);
         assert_eq!(FileCategory::TypeScriptSource.risk_level(), 2);
+    }
+
+    #[test]
+    fn test_conservative_profile_limits_categories() {
+        let rules = rules_with_profile(PruneProfile::Conservative);
+
+        assert_eq!(
+            rules.classify(&PathBuf::from(".github/workflows/ci.yml")),
+            Some(FileCategory::CiConfig)
+        );
+        assert_eq!(
+            rules.classify(&PathBuf::from("__tests__/foo.js")),
+            Some(FileCategory::TestAsset)
+        );
+        assert_eq!(rules.classify(&PathBuf::from("README.md")), None);
+        assert_eq!(rules.classify(&PathBuf::from("dist/bundle.js.map")), None);
+    }
+
+    #[test]
+    fn test_balanced_profile_keeps_risky_sources_and_build_artifacts() {
+        let rules = PruneRules::new();
+
+        assert_eq!(
+            rules.classify(&PathBuf::from("README.md")),
+            Some(FileCategory::Documentation)
+        );
+        assert_eq!(
+            rules.classify(&PathBuf::from("examples/basic.js")),
+            Some(FileCategory::Example)
+        );
+        assert_eq!(
+            rules.classify(&PathBuf::from("dist/bundle.js.map")),
+            Some(FileCategory::SourceMap)
+        );
+        assert_eq!(rules.classify(&PathBuf::from("src/utils.ts")), None);
+        assert_eq!(rules.classify(&PathBuf::from("native/addon.c")), None);
+    }
+
+    #[test]
+    fn test_aggressive_profile_enables_all_categories() {
+        let rules = rules_with_profile(PruneProfile::Aggressive);
+
+        assert_eq!(
+            rules.classify(&PathBuf::from("README.md")),
+            Some(FileCategory::Documentation)
+        );
+        assert_eq!(
+            rules.classify(&PathBuf::from("native/addon.c")),
+            Some(FileCategory::BuildArtifact)
+        );
+        assert_eq!(
+            rules.classify(&PathBuf::from("src/utils.ts")),
+            Some(FileCategory::TypeScriptSource)
+        );
     }
 
     /// Verifies that with --keep-license enabled, LICENSE files are never deleted.
