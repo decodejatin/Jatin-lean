@@ -216,6 +216,42 @@ fn test_scan_result_savings() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn test_scan_skips_recursive_symlink_packages() -> Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new()?;
+    let nm = temp.path().join("node_modules");
+    fs::create_dir_all(&nm)?;
+
+    let package = nm.join("linked-pkg");
+    fs::create_dir_all(&package)?;
+    fs::write(
+        package.join("package.json"),
+        r#"{"name":"linked-pkg","version":"1.0.0","main":"index.js"}"#,
+    )?;
+    fs::write(package.join("index.js"), "module.exports = {};")?;
+    fs::write(package.join("README.md"), "# linked-pkg\n")?;
+
+    symlink(&package, nm.join("linked-pkg-alias"))?;
+    symlink(&nm, package.join("recursive-node-modules"))?;
+
+    let rules = jatin_lean::rules::PruneRules::new();
+    let result = jatin_lean::scanner::scan_node_modules(&nm, &rules, None)?;
+
+    assert_eq!(
+        result.total_packages, 1,
+        "symlink aliases should not schedule the same physical package twice"
+    );
+    assert!(
+        result.total_files > 0,
+        "scan should finish and collect files from the real package"
+    );
+
+    Ok(())
+}
+
 #[test]
 fn test_lockfile_parser() -> Result<()> {
     let temp = TempDir::new()?;
