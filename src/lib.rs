@@ -68,3 +68,4 @@ pub mod system_apply;
 // Node.js bindings
 #[cfg(feature = "napi")]
 pub mod node_bindings;
+pub mod network_trace;

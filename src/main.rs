@@ -83,6 +83,7 @@ mod visualizer;
 mod watcher;
 mod xdp_middleware;
 mod zero_copy_serde;
+mod network_trace;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
