@@ -349,13 +349,13 @@ impl MockSystem {
 #[cfg(all(target_os = "linux", feature = "ebpf"))]
 pub mod linux_ebpf {
     use super::*;
-    
+
     pub fn attach_real_socket_filter(_prog_fd: i32, _socket_fd: i32) -> Result<(), &'static str> {
         // Implementation for attaching a real socket filter via setsockopt
         // SO_ATTACH_BPF would go here.
         Ok(())
     }
-    
+
     pub fn load_bpf_program(prog: &BpfProgram) -> Result<i32, &'static str> {
         // If the verifier passes in our mock layer, we would pass to bpf() syscall.
         let result = prog.verify();

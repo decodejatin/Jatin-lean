@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 // Re-export core functionality
 use crate::{
-    analyzer, benchmark, compress, dedup, hardware_tuning, health, lockfile, rules, scanner, simd,
+    benchmark, compress, dedup, hardware_tuning, health, lockfile, rules, scanner, simd,
     treeshake,
 };
 
@@ -93,10 +93,10 @@ pub fn scan_node_modules(path: String) -> Result<ScanResult> {
     // [u16: package_len]
     // [bytes: package]
     buffer_data.extend_from_slice(&(result.candidates.len() as u32).to_le_bytes());
-    
+
     for c in &result.candidates {
         buffer_data.extend_from_slice(&c.size.to_le_bytes());
-        
+
         let cat_val: u8 = match c.category {
             rules::FileCategory::Documentation => 0,
             rules::FileCategory::TestAsset => 1,
@@ -107,12 +107,12 @@ pub fn scan_node_modules(path: String) -> Result<ScanResult> {
             rules::FileCategory::Example => 6,
         };
         buffer_data.push(cat_val);
-        
+
         let path_str = c.path.to_string_lossy();
         let path_bytes = path_str.as_bytes();
         buffer_data.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
         buffer_data.extend_from_slice(path_bytes);
-        
+
         let pkg_bytes = c.package_name.as_bytes();
         buffer_data.extend_from_slice(&(pkg_bytes.len() as u16).to_le_bytes());
         buffer_data.extend_from_slice(pkg_bytes);
