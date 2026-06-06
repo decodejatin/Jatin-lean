@@ -1,5 +1,12 @@
 // TypeScript definitions for @jatin/lean
 
+export interface PruneCandidate {
+  path: string;
+  size: number;
+  category: string;
+  packageName: string;
+}
+
 export interface ScanResult {
   totalFiles: number;
   totalSize: number;
@@ -7,6 +14,7 @@ export interface ScanResult {
   candidatesCount: number;
   potentialSavings: number;
   savingsPercentage: number;
+  candidates?: PruneCandidate[];
 }
 
 export interface HealthResult {
