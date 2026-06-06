@@ -1,8 +1,6 @@
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
+
 
 /// eBPF Network Trace Collector
 /// Collects and aggregates network traces.

@@ -37,6 +37,7 @@ pub mod memory_pool;
 pub mod mmap;
 pub mod mmap_ipc;
 pub mod network;
+pub mod network_trace;
 pub mod pcie_bottleneck;
 pub mod plugin;
 pub mod policy;
@@ -68,4 +69,3 @@ pub mod system_apply;
 // Node.js bindings
 #[cfg(feature = "napi")]
 pub mod node_bindings;
-pub mod network_trace;

@@ -60,6 +60,7 @@ mod memory_pool;
 mod mmap;
 mod mmap_ipc;
 mod network;
+mod network_trace;
 mod output;
 mod pcie_bottleneck;
 mod plugin;
@@ -83,7 +84,6 @@ mod visualizer;
 mod watcher;
 mod xdp_middleware;
 mod zero_copy_serde;
-mod network_trace;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
