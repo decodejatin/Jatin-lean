@@ -37,6 +37,7 @@ pub mod memory_pool;
 pub mod mmap;
 pub mod mmap_ipc;
 pub mod network;
+pub mod network_trace;
 pub mod pcie_bottleneck;
 pub mod plugin;
 pub mod policy;

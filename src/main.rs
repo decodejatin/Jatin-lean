@@ -60,6 +60,7 @@ mod memory_pool;
 mod mmap;
 mod mmap_ipc;
 mod network;
+mod network_trace;
 mod output;
 mod pcie_bottleneck;
 mod plugin;

@@ -55,6 +55,13 @@ pub enum NetworkCommands {
         #[arg(long, default_value = "1024")]
         payload_size: usize,
     },
+
+    /// eBPF Network Trace Collector
+    Trace {
+        /// Number of packets to simulate tracing
+        #[arg(long, default_value = "1000")]
+        packets: usize,
+    },
 }
 
 pub fn handle_command(command: NetworkCommands, ctx: &OutputContext) -> Result<()> {
@@ -464,6 +471,45 @@ pub fn handle_command(command: NetworkCommands, ctx: &OutputContext) -> Result<(
             } else {
                 println!();
                 print_gateway_report(&gw);
+            }
+            Ok(())
+        }
+
+        NetworkCommands::Trace { packets } => {
+            use crate::network_trace::NetworkTraceCollector;
+            use std::net::{IpAddr, Ipv4Addr};
+
+            if !ctx.json {
+                println!(
+                    "  {} {}",
+                    style("eBPF Network Trace Collector").cyan().bold(),
+                    style("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━").dim()
+                );
+            }
+
+            let collector = NetworkTraceCollector::new();
+
+            for i in 0..packets {
+                collector.trace_packet(
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, (i % 255) as u8)),
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+                    64 + (i % 1000),
+                );
+            }
+
+            let (pkts, bytes) = collector.report();
+
+            if ctx.json {
+                let json_out = serde_json::json!({
+                    "traced_packets": pkts,
+                    "traced_bytes": bytes,
+                });
+                crate::output::output_result("network trace", &json_out, ctx)?;
+            } else {
+                println!();
+                println!("  {} Traced Packets: {}", style("📊").yellow(), style(pkts).green().bold());
+                println!("  {} Traced Bytes:   {}", style("💾").yellow(), style(bytes).white());
+                println!();
             }
             Ok(())
         }
