@@ -170,6 +170,10 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     export: Option<PathBuf>,
 
+    /// Exclude directories or glob patterns from scanning (can be used multiple times)
+    #[arg(short = 'e', long = "exclude", value_name = "DIR", num_args(0..), action = clap::ArgAction::Append)]
+    exclude: Vec<String>,
+
     /// Subcommands for advanced features
     #[command(subcommand)]
     command: Option<Commands>,
@@ -272,7 +276,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("Cannot access path: {}", args.path.display()))?;
 
     if args.global {
-        run_global_mode(&target, args.max_depth)?;
+        run_global_mode(&target, args.max_depth, &args.exclude)?;
     } else {
         run_local_mode(
             &target,
@@ -285,6 +289,7 @@ fn main() -> Result<()> {
             args.perf_profile,
             args.snapshot,
             args.export.as_deref(),
+            &args.exclude,
         )?;
     }
 
@@ -316,6 +321,7 @@ pub fn run_local_mode_from_args(
     perf_profile: bool,
     snapshot: bool,
     export: Option<&std::path::Path>,
+    exclude: &[String],
     _ctx: &output::OutputContext,
 ) -> Result<()> {
     let target = std::fs::canonicalize(path)?;
@@ -330,6 +336,7 @@ pub fn run_local_mode_from_args(
         perf_profile,
         snapshot,
         export,
+        exclude,
     )
 }
 
@@ -345,6 +352,7 @@ fn run_local_mode(
     perf_profile: bool,
     create_snapshot: bool,
     export_path: Option<&Path>,
+    exclude_patterns: &[String],
 ) -> Result<()> {
     let mut profiler = profiler::Profiler::with_profiling(perf_profile);
     let overall_start = Instant::now();
@@ -409,7 +417,7 @@ fn run_local_mode(
         style("◉").cyan(),
         style(rules.profile.name()).cyan()
     );
-    let scan_result = scanner::scan_node_modules(&nm_path, &rules, None)
+    let scan_result = scanner::scan_node_modules(&nm_path, &rules, exclude_patterns, None)
         .context("Failed to scan node_modules")?;
     profiler.end_span(scan_result.total_files);
 
@@ -652,7 +660,7 @@ fn export_report(scan_result: &scanner::ScanResult, path: &Path) -> Result<()> {
 }
 
 /// Run in global mode — scan all projects in a directory.
-fn run_global_mode(root: &Path, max_depth: usize) -> Result<()> {
+fn run_global_mode(root: &Path, max_depth: usize, exclude_patterns: &[String]) -> Result<()> {
     println!(
         "  {} Scanning for node_modules in {}...",
         style("◉").cyan(),
@@ -685,7 +693,7 @@ fn run_global_mode(root: &Path, max_depth: usize) -> Result<()> {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
-        match scanner::scan_node_modules(nm_path, &rules, None) {
+        match scanner::scan_node_modules(nm_path, &rules, exclude_patterns, None) {
             Ok(result) => {
                 let savings = result.savings();
                 let days = scanner::last_accessed_days(nm_path);

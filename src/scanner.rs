@@ -121,6 +121,7 @@ pub fn last_accessed_days(path: &Path) -> Option<u64> {
 pub fn scan_node_modules(
     node_modules_path: &Path,
     rules: &PruneRules,
+    exclude_patterns: &[String],
     profiler: Option<&mut Profiler>,
 ) -> Result<ScanResult> {
     let scan_start = Instant::now();
@@ -201,6 +202,9 @@ pub fn scan_node_modules(
     // Store per-package timings
     let package_timings: Arc<Mutex<Vec<PackageTiming>>> = Arc::new(Mutex::new(Vec::new()));
 
+    let node_modules_path_buf = node_modules_path.to_path_buf();
+    let excludes = exclude_patterns.to_vec();
+
     // Process packages in parallel
     packages.par_iter().for_each(|pkg_path| {
         let arena = ScanArena::new();
@@ -236,10 +240,27 @@ pub fn scan_node_modules(
         let mut pkg_total_size = 0;
         let mut pkg_candidates = 0;
 
+        let excludes = excludes.clone();
+        let nm_path = node_modules_path_buf.clone();
+
         let walker = WalkBuilder::new(pkg_path)
             .hidden(false)
             .git_ignore(false)
             .follow_links(false)
+            .filter_entry(move |e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                if let Ok(relative) = e.path().strip_prefix(&nm_path) {
+                    let relative_str = relative.to_string_lossy().replace("\\", "/");
+                    let should_skip = excludes.iter().any(|pattern| {
+                        relative_str.starts_with(pattern.as_str())
+                    });
+                    !should_skip
+                } else {
+                    true
+                }
+            })
             .build();
 
         for entry in walker.flatten() {
@@ -758,5 +779,60 @@ mod tests {
             high_risk.risk_label(),
             "HIGH — TypeScript sources included (declarations kept)"
         );
+    }
+
+    #[test]
+    fn test_scan_excludes_directories() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let node_modules = dir.path().join("node_modules");
+        fs::create_dir_all(node_modules.join("pkg1")).unwrap();
+        fs::write(node_modules.join("pkg1").join("f1.md"), b"hello").unwrap();
+        fs::write(node_modules.join("pkg1").join("package.json"), b"{}").unwrap();
+        
+        fs::create_dir_all(node_modules.join("pkg2")).unwrap();
+        fs::write(node_modules.join("pkg2").join("f2.md"), b"world").unwrap();
+        fs::write(node_modules.join("pkg2").join("package.json"), b"{}").unwrap();
+        
+        fs::create_dir_all(node_modules.join("@scope").join("pkg3")).unwrap();
+        fs::write(node_modules.join("@scope").join("pkg3").join("f3.md"), b"scope").unwrap();
+        fs::write(node_modules.join("@scope").join("pkg3").join("package.json"), b"{}").unwrap();
+
+        let rules = PruneRules::new();
+        // Exclude "@scope"
+        let result = scan_node_modules(&node_modules, &rules, &["@scope".to_string()], None).unwrap();
+        
+        let paths: Vec<String> = result.candidates.iter().map(|p| p.path.file_name().unwrap().to_str().unwrap().to_string()).collect();
+        assert!(paths.contains(&"f1.md".to_string()));
+        assert!(paths.contains(&"f2.md".to_string()));
+        assert!(!paths.contains(&"f3.md".to_string()));
+    }
+
+    #[test]
+    fn test_exclude_multiple_patterns() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let node_modules = dir.path().join("node_modules");
+        fs::create_dir_all(node_modules.join("a")).unwrap();
+        fs::write(node_modules.join("a").join("a.md"), b"").unwrap();
+        fs::write(node_modules.join("a").join("package.json"), b"{}").unwrap();
+        
+        fs::create_dir_all(node_modules.join("b")).unwrap();
+        fs::write(node_modules.join("b").join("b.md"), b"").unwrap();
+        fs::write(node_modules.join("b").join("package.json"), b"{}").unwrap();
+        
+        fs::create_dir_all(node_modules.join("c")).unwrap();
+        fs::write(node_modules.join("c").join("c.md"), b"").unwrap();
+        fs::write(node_modules.join("c").join("package.json"), b"{}").unwrap();
+
+        let rules = PruneRules::new();
+        let result = scan_node_modules(&node_modules, &rules, &["a".into(), "c".into()], None).unwrap();
+        
+        let names: Vec<_> = result.candidates.iter().map(|p| p.path.file_name().unwrap().to_str().unwrap().to_string()).collect();
+        assert!(!names.contains(&"a.md".to_string()));
+        assert!(names.contains(&"b.md".to_string()));
+        assert!(!names.contains(&"c.md".to_string()));
     }
 }

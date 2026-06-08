@@ -54,7 +54,7 @@ pub fn handle_ai_context(path: PathBuf, ctx: &OutputContext) -> Result<()> {
     // Detect project context
     let project_ctx = if nm_path.exists() {
         let rules = crate::rules::PruneRules::new();
-        let scan_result = crate::scanner::scan_node_modules(&nm_path, &rules, None)?;
+        let scan_result = crate::scanner::scan_node_modules(&nm_path, &rules, &[], None)?;
         let analysis = crate::analyzer::analyze_project(&nm_path)?;
 
         Some(ProjectContext {
