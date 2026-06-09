@@ -70,7 +70,7 @@ pub fn scan_node_modules(path: String) -> Result<ScanResult> {
     let nm_path = path_buf.join("node_modules");
 
     let rules = rules::PruneRules::new();
-    let result = scanner::scan_node_modules(&nm_path, &rules, None)
+    let result = scanner::scan_node_modules(&nm_path, &rules, &[], None)
         .map_err(|e| Error::from_reason(format!("Scan failed: {}", e)))?;
 
     let savings = result.savings();

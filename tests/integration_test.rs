@@ -140,7 +140,7 @@ fn test_full_scan_pipeline() -> Result<()> {
 
     let nm_path = temp.path().join("node_modules");
     let rules = jatin_lean::rules::PruneRules::new();
-    let result = jatin_lean::scanner::scan_node_modules(&nm_path, &rules, None)?;
+    let result = jatin_lean::scanner::scan_node_modules(&nm_path, &rules, &[], None)?;
 
     assert!(result.total_files > 0, "Should find files");
     assert!(result.total_size > 0, "Should calculate size");
@@ -162,7 +162,7 @@ fn test_scan_finds_documentation() -> Result<()> {
 
     let nm_path = temp.path().join("node_modules");
     let rules = jatin_lean::rules::PruneRules::new();
-    let result = jatin_lean::scanner::scan_node_modules(&nm_path, &rules, None)?;
+    let result = jatin_lean::scanner::scan_node_modules(&nm_path, &rules, &[], None)?;
 
     // README and CHANGELOG should be in candidates
     let has_readme = result.candidates.iter().any(|c| {
@@ -205,7 +205,7 @@ fn test_scan_result_savings() -> Result<()> {
 
     let nm_path = temp.path().join("node_modules");
     let rules = jatin_lean::rules::PruneRules::new();
-    let result = jatin_lean::scanner::scan_node_modules(&nm_path, &rules, None)?;
+    let result = jatin_lean::scanner::scan_node_modules(&nm_path, &rules, &[], None)?;
 
     let savings = result.savings();
     assert!(

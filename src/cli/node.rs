@@ -176,6 +176,7 @@ pub fn handle_command(command: NodeCommands, ctx: &OutputContext) -> Result<()> 
                 profile,
                 snapshot,
                 export.as_deref(),
+                &[],
                 ctx,
             )
         }
@@ -188,7 +189,7 @@ pub fn handle_command(command: NodeCommands, ctx: &OutputContext) -> Result<()> 
         } => {
             // keep_license is not exposed on the node prune subcommand; default to false
             crate::run_local_mode_from_args(
-                &path, force, yes, verbose, false, false, snapshot, None, ctx,
+                &path, force, yes, verbose, false, false, snapshot, None, &[], ctx,
             )
         }
         NodeCommands::Health { path } => {
@@ -479,7 +480,7 @@ pub fn handle_command(command: NodeCommands, ctx: &OutputContext) -> Result<()> 
             let mut w = crate::watcher::NodeModulesWatcher::new(nm_path.clone(), config);
             w.watch(|nm_path| {
                 let rules = crate::rules::PruneRules::new();
-                let scan_result = crate::scanner::scan_node_modules(nm_path, &rules, None)?;
+                let scan_result = crate::scanner::scan_node_modules(nm_path, &rules, &[], None)?;
                 if ctx.json {
                     crate::output::output_result(
                         "node watch_event",
@@ -594,7 +595,7 @@ pub fn handle_command(command: NodeCommands, ctx: &OutputContext) -> Result<()> 
                 crate::display::print_banner();
             }
             let rules = crate::rules::PruneRules::new();
-            let scan_result = crate::scanner::scan_node_modules(&nm_path, &rules, None)?;
+            let scan_result = crate::scanner::scan_node_modules(&nm_path, &rules, &[], None)?;
 
             if ctx.json {
                 crate::output::output_result(
