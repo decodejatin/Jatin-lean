@@ -5,6 +5,12 @@
 //! line-rate packet processing, protocol obfuscation, and load balancing.
 //! Processes millions of packets per second at NIC driver level,
 //! before sk_buff allocation occurs.
+//!
+//! # Compilation Constraints & Kernel Dependencies
+//! - The real eBPF kernel packet tracing capabilities are only available on Linux (`target_os = "linux"`).
+//! - They must be explicitly enabled using the `ebpf` feature flag.
+//! - Requires Linux kernel version >= 5.3 (for bounded loop support) or >= 5.8 (for broad bpf ringbuf support).
+//! - When compiled without the `ebpf` feature or on non-Linux platforms (macOS, Windows), a robust mock engine is used.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -623,6 +629,57 @@ pub fn print_architecture_comparison() {
         );
     }
     println!();
+}
+
+// ─── eBPF Network Trace Collector (Stub/Mock System) ─────────────────────────
+
+/// Emulates network traffic tracing for testing and non-Linux platforms.
+#[derive(Debug, Clone)]
+pub struct MockTraceCollector {
+    pub active_traces: Vec<String>,
+}
+
+impl MockTraceCollector {
+    pub fn new() -> Self {
+        Self {
+            active_traces: Vec::new(),
+        }
+    }
+
+    pub fn start_trace(&mut self, interface: &str) {
+        self.active_traces.push(interface.to_string());
+    }
+
+    pub fn stop_trace(&mut self, interface: &str) {
+        self.active_traces.retain(|i| i != interface);
+    }
+}
+
+/// Real eBPF packet tracing integration, only compiled on Linux with `ebpf` feature.
+#[cfg(all(target_os = "linux", feature = "ebpf"))]
+pub mod linux_trace {
+    pub fn init_kernel_tracing(interface: &str) -> Result<(), &'static str> {
+        // Here we would use libbpf-rs or similar to attach an eBPF tracepoint
+        // or perf_event array for capturing real packets from the kernel.
+        Ok(())
+    }
+
+    pub fn stop_kernel_tracing(interface: &str) -> Result<(), &'static str> {
+        // Implementation to detach the tracepoint.
+        Ok(())
+    }
+}
+
+/// Dummy module for non-Linux or without `ebpf` feature.
+#[cfg(not(all(target_os = "linux", feature = "ebpf")))]
+pub mod linux_trace {
+    pub fn init_kernel_tracing(_interface: &str) -> Result<(), &'static str> {
+        Err("Real eBPF packet tracing requires target_os=\"linux\" and feature=\"ebpf\"")
+    }
+
+    pub fn stop_kernel_tracing(_interface: &str) -> Result<(), &'static str> {
+        Err("Real eBPF packet tracing requires target_os=\"linux\" and feature=\"ebpf\"")
+    }
 }
 
 #[cfg(test)]

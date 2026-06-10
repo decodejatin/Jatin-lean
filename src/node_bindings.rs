@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 // Re-export core functionality
 use crate::{
-    analyzer, benchmark, compress, dedup, hardware_tuning, health, lockfile, rules, scanner, simd,
+    benchmark, compress, dedup, hardware_tuning, health, lockfile, rules, scanner, simd,
     treeshake,
 };
 
@@ -21,6 +21,7 @@ pub struct ScanResult {
     pub candidates_count: u32,
     pub potential_savings: f64,
     pub savings_percentage: f64,
+    pub candidates_buffer: napi::bindgen_prelude::Buffer,
 }
 
 /// Health check result
@@ -75,11 +76,47 @@ pub fn scan_node_modules(path: String) -> Result<ScanResult> {
 
     let savings = result.savings();
     let savings_pct = if result.total_size > 0 {
-        // (savings as f64 / result.total_size as f64 * 100.0)
         savings as f64 / result.total_size as f64 * 100.0
     } else {
         0.0
     };
+
+    // Serialize candidates into a raw binary buffer
+    let mut buffer_data = Vec::new();
+    // Format:
+    // [u32: count]
+    // For each candidate:
+    // [u64: size]
+    // [u8: category]
+    // [u16: path_len]
+    // [bytes: path]
+    // [u16: package_len]
+    // [bytes: package]
+    buffer_data.extend_from_slice(&(result.candidates.len() as u32).to_le_bytes());
+
+    for c in &result.candidates {
+        buffer_data.extend_from_slice(&c.size.to_le_bytes());
+
+        let cat_val: u8 = match c.category {
+            rules::FileCategory::Documentation => 0,
+            rules::FileCategory::TestAsset => 1,
+            rules::FileCategory::BuildArtifact => 2,
+            rules::FileCategory::SourceMap => 3,
+            rules::FileCategory::CiConfig => 4,
+            rules::FileCategory::TypeScriptSource => 5,
+            rules::FileCategory::Example => 6,
+        };
+        buffer_data.push(cat_val);
+
+        let path_str = c.path.to_string_lossy();
+        let path_bytes = path_str.as_bytes();
+        buffer_data.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
+        buffer_data.extend_from_slice(path_bytes);
+
+        let pkg_bytes = c.package_name.as_bytes();
+        buffer_data.extend_from_slice(&(pkg_bytes.len() as u16).to_le_bytes());
+        buffer_data.extend_from_slice(pkg_bytes);
+    }
 
     Ok(ScanResult {
         total_files: result.total_files as u32,
@@ -88,6 +125,7 @@ pub fn scan_node_modules(path: String) -> Result<ScanResult> {
         candidates_count: result.candidates.len() as u32,
         potential_savings: savings as f64,
         savings_percentage: savings_pct,
+        candidates_buffer: buffer_data.into(),
     })
 }
 
