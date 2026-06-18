@@ -1,74 +1,60 @@
-//! File system watcher: monitor node_modules for auto-pruning.
+//! Lockfile watcher: monitor lockfiles for auto-pruning.
 //!
-//! Watches for changes to node_modules (e.g., after `npm install`)
-//! and automatically triggers a scan + prune cycle. Uses polling
-//! for broad platform compatibility.
+//! Uses the `notify` crate for event-driven file system monitoring of lockfiles
+//! (package-lock.json, yarn.lock, pnpm-lock.yaml) with debouncing.
 
-use anyhow::Result;
-use std::fs;
+use anyhow::{Context, Result};
+use console::style;
+use notify::{RecursiveMode, Watcher};
+use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
-/// Configuration for the watcher.
+const LOCK_FILES: &[&str] = &["package-lock.json", "yarn.lock", "pnpm-lock.yaml"];
+
+/// Configuration for the lockfile watcher.
 #[derive(Debug, Clone)]
 pub struct WatcherConfig {
-    /// Polling interval in seconds
-    pub poll_interval_secs: u64,
+    /// Debounce delay in seconds (default: 4)
+    pub debounce_secs: u64,
     /// Whether to auto-prune on detected changes
     pub auto_prune: bool,
-    /// Whether to create snapshots before auto-pruning
-    pub snapshot_before_prune: bool,
     /// Maximum number of auto-prune cycles (0 = unlimited)
     pub max_cycles: u64,
-    /// Grace period after change detection before scanning (seconds)
-    pub grace_period_secs: u64,
 }
 
 impl Default for WatcherConfig {
     fn default() -> Self {
         Self {
-            poll_interval_secs: 5,
+            debounce_secs: 4,
             auto_prune: false,
-            snapshot_before_prune: true,
             max_cycles: 0,
-            grace_period_secs: 3,
         }
     }
 }
 
-/// State of a watched directory.
-#[derive(Debug, Clone)]
-struct DirectoryState {
-    /// Hash of the directory state (file count + mod times)
-    hash: u64,
-    /// When this state was captured
-    captured_at: Instant,
-}
-
-/// A watcher that monitors node_modules for changes.
-pub struct NodeModulesWatcher {
-    /// Path to the node_modules directory
-    node_modules_path: PathBuf,
+/// A watcher that monitors lockfiles in a project root directory.
+pub struct LockfileWatcher {
+    /// Path to the project root
+    project_path: PathBuf,
     /// Watcher configuration
     config: WatcherConfig,
     /// Running flag (shared with signal handler)
     running: Arc<AtomicBool>,
-    /// Previous directory state for change detection
-    last_state: Option<DirectoryState>,
     /// Number of prune cycles completed
     cycle_count: u64,
 }
 
-impl NodeModulesWatcher {
-    /// Create a new watcher.
-    pub fn new(node_modules_path: PathBuf, config: WatcherConfig) -> Self {
+impl LockfileWatcher {
+    /// Create a new lockfile watcher.
+    pub fn new(project_path: PathBuf, config: WatcherConfig) -> Self {
         Self {
-            node_modules_path,
+            project_path,
             config,
-            running: Arc::new(AtomicBool::new(false)),
-            last_state: None,
+            running: Arc::new(AtomicBool::new(true)),
             cycle_count: 0,
         }
     }
@@ -78,30 +64,50 @@ impl NodeModulesWatcher {
         self.running.clone()
     }
 
-    /// Start watching (blocking call).
+    /// Start watching lockfiles (blocking call).
     pub fn watch<F>(&mut self, on_change: F) -> Result<()>
     where
         F: Fn(&Path) -> Result<()>,
     {
-        use console::style;
+        let (tx, rx) = mpsc::channel::<DebounceEventResult>();
 
-        self.running.store(true, Ordering::SeqCst);
+        let mut debouncer = new_debouncer(
+            Duration::from_secs(self.config.debounce_secs),
+            None,
+            tx,
+        )
+        .context("Failed to create file debouncer")?;
+
+        debouncer
+            .watcher()
+            .watch(&self.project_path, RecursiveMode::NonRecursive)
+            .with_context(|| {
+                format!(
+                    "Failed to watch directory: {}",
+                    self.project_path.display()
+                )
+            })?;
 
         println!();
         println!(
             "  {} {}",
-            style("Watch Mode").cyan().bold(),
+            style("Watch Mode (Lockfiles)").cyan().bold(),
             style("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━").dim()
         );
         println!(
             "  {} Watching: {}",
             style("◉").cyan(),
-            style(self.node_modules_path.display()).white().bold()
+            style(self.project_path.display()).white().bold()
         );
         println!(
-            "  {} Poll interval: {}s",
+            "  {} Lockfiles: {}",
             style("◉").cyan(),
-            self.config.poll_interval_secs
+            style("package-lock.json, yarn.lock, pnpm-lock.yaml").dim()
+        );
+        println!(
+            "  {} Debounce: {}s",
+            style("◉").cyan(),
+            self.config.debounce_secs
         );
         println!(
             "  {} Auto-prune: {}",
@@ -115,44 +121,27 @@ impl NodeModulesWatcher {
         );
         println!();
 
-        // Capture initial state
-        self.last_state = Some(self.capture_state()?);
-
         while self.running.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_secs(self.config.poll_interval_secs));
+            match rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(Ok(events)) => {
+                    let has_lockfile_event = events.iter().any(|e| {
+                        e.path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| LOCK_FILES.contains(&n))
+                            .unwrap_or(false)
+                    });
 
-            if !self.running.load(Ordering::SeqCst) {
-                break;
-            }
+                    if !has_lockfile_event {
+                        continue;
+                    }
 
-            // Check for changes
-            let current_state = match self.capture_state() {
-                Ok(state) => state,
-                Err(e) => {
-                    eprintln!("  {} Error scanning: {}", style("⚠").yellow(), e);
-                    continue;
-                }
-            };
-
-            if let Some(ref last) = self.last_state {
-                if current_state.hash != last.hash {
                     println!(
-                        "  {} Changes detected in node_modules!",
+                        "  {} Lockfile change detected!",
                         style("⚡").yellow().bold()
                     );
 
-                    // Grace period
-                    if self.config.grace_period_secs > 0 {
-                        println!(
-                            "  {} Waiting {}s for install to complete...",
-                            style("◉").dim(),
-                            self.config.grace_period_secs
-                        );
-                        std::thread::sleep(Duration::from_secs(self.config.grace_period_secs));
-                    }
-
-                    // Trigger callback
-                    match on_change(&self.node_modules_path) {
+                    match on_change(&self.project_path) {
                         Ok(()) => {
                             self.cycle_count += 1;
                             println!(
@@ -166,8 +155,9 @@ impl NodeModulesWatcher {
                         }
                     }
 
-                    // Check max cycles
-                    if self.config.max_cycles > 0 && self.cycle_count >= self.config.max_cycles {
+                    if self.config.max_cycles > 0
+                        && self.cycle_count >= self.config.max_cycles
+                    {
                         println!(
                             "  {} Max cycles ({}) reached. Stopping.",
                             style("ℹ").blue(),
@@ -176,9 +166,14 @@ impl NodeModulesWatcher {
                         break;
                     }
                 }
+                Ok(Err(errors)) => {
+                    for e in &errors {
+                        eprintln!("  {} Watch error: {:?}", style("⚠").yellow(), e);
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
-
-            self.last_state = Some(current_state);
         }
 
         println!(
@@ -195,41 +190,6 @@ impl NodeModulesWatcher {
     pub fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
     }
-
-    /// Capture the current state of the node_modules directory.
-    fn capture_state(&self) -> Result<DirectoryState> {
-        let hash = compute_directory_hash(&self.node_modules_path)?;
-        Ok(DirectoryState {
-            hash,
-            captured_at: Instant::now(),
-        })
-    }
-}
-
-/// Compute a fast hash of a directory's state.
-/// Uses file count at the top level + total sizes as a fingerprint.
-fn compute_directory_hash(path: &Path) -> Result<u64> {
-    let mut hash: u64 = 0;
-    let mut count: u64 = 0;
-
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            count += 1;
-            if let Ok(metadata) = entry.metadata() {
-                hash = hash.wrapping_add(metadata.len());
-                if let Ok(modified) = metadata.modified() {
-                    let mtime = modified
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    hash = hash.wrapping_add(mtime);
-                }
-            }
-        }
-    }
-
-    hash = hash.wrapping_mul(31).wrapping_add(count);
-    Ok(hash)
 }
 
 /// Post-install hook checker: detect if npm/yarn/pnpm just ran.
@@ -242,13 +202,12 @@ pub fn detect_recent_install(project_dir: &Path) -> Option<InstallInfo> {
 
     for (filename, manager) in &lock_files {
         let path = project_dir.join(filename);
-        if let Ok(metadata) = fs::metadata(&path) {
+        if let Ok(metadata) = std::fs::metadata(&path) {
             if let Ok(modified) = metadata.modified() {
                 let age = SystemTime::now()
                     .duration_since(modified)
                     .unwrap_or_default();
 
-                // If lock file was modified in the last 30 seconds
                 if age.as_secs() < 30 {
                     return Some(InstallInfo {
                         package_manager: manager.to_string(),
@@ -279,30 +238,15 @@ mod tests {
     #[test]
     fn test_watcher_config_default() {
         let config = WatcherConfig::default();
-        assert_eq!(config.poll_interval_secs, 5);
+        assert_eq!(config.debounce_secs, 4);
         assert!(!config.auto_prune);
-        assert!(config.snapshot_before_prune);
-    }
-
-    #[test]
-    fn test_compute_directory_hash() -> Result<()> {
-        let temp = TempDir::new()?;
-        let hash1 = compute_directory_hash(temp.path())?;
-
-        // Add a file
-        fs::write(temp.path().join("test.txt"), "hello")?;
-        let hash2 = compute_directory_hash(temp.path())?;
-
-        assert_ne!(hash1, hash2);
-        Ok(())
     }
 
     #[test]
     fn test_watcher_creation() {
         let watcher =
-            NodeModulesWatcher::new(PathBuf::from("/tmp/node_modules"), WatcherConfig::default());
+            LockfileWatcher::new(PathBuf::from("/tmp/test"), WatcherConfig::default());
         assert_eq!(watcher.cycle_count, 0);
-        assert!(watcher.last_state.is_none());
     }
 
     #[test]
