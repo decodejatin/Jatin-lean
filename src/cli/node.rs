@@ -454,44 +454,57 @@ pub fn handle_command(command: NodeCommands, ctx: &OutputContext) -> Result<()> 
             max_cycles,
         } => {
             let target = std::fs::canonicalize(&path)?;
-            let nm_path = target.join("node_modules");
-            if !nm_path.exists() {
-                if ctx.json {
-                    crate::output::output_error("node watch", "No node_modules found", ctx)?;
-                } else {
-                    println!(
-                        "  {} No node_modules found at {}",
-                        style("✗").red().bold(),
-                        style(target.display()).dim()
-                    );
-                }
-                return Ok(());
-            }
             if !ctx.json {
                 crate::display::print_banner();
             }
+            let should_prune = auto_prune;
             let config = crate::watcher::WatcherConfig {
-                poll_interval_secs: interval,
+                debounce_secs: interval,
                 auto_prune,
                 max_cycles,
-                ..Default::default()
             };
-            let mut w = crate::watcher::NodeModulesWatcher::new(nm_path.clone(), config);
-            w.watch(|nm_path| {
-                let rules = crate::rules::PruneRules::new();
-                let scan_result = crate::scanner::scan_node_modules(nm_path, &rules, None)?;
-                if ctx.json {
-                    crate::output::output_result(
-                        "node watch_event",
-                        &serde_json::json!({
-                            "event": "scan_completed",
-                            "candidates": scan_result.candidates.len(),
-                        }),
+            let mut w = crate::watcher::LockfileWatcher::new(target.clone(), config);
+            w.watch(|project_path| {
+                let nm_path = project_path.join("node_modules");
+                if !nm_path.exists() {
+                    if ctx.json {
+                        crate::output::output_error(
+                            "node watch",
+                            "No node_modules found; skipping",
+                            ctx,
+                        )?;
+                    }
+                    return Ok(());
+                }
+                if should_prune {
+                    crate::run_local_mode_from_args(
+                        &project_path.to_path_buf(),
+                        true,
+                        true,
+                        false,
+                        false,
+                        false,
+                        false,
+                        None,
                         ctx,
                     )?;
                 } else {
-                    crate::display::print_discovery(&scan_result);
-                    crate::display::print_simulation(&scan_result);
+                    let rules = crate::rules::PruneRules::new();
+                    let scan_result =
+                        crate::scanner::scan_node_modules(&nm_path, &rules, None)?;
+                    if ctx.json {
+                        crate::output::output_result(
+                            "node watch_event",
+                            &serde_json::json!({
+                                "event": "scan_completed",
+                                "candidates": scan_result.candidates.len(),
+                            }),
+                            ctx,
+                        )?;
+                    } else {
+                        crate::display::print_discovery(&scan_result);
+                        crate::display::print_simulation(&scan_result);
+                    }
                 }
                 Ok(())
             })?;
